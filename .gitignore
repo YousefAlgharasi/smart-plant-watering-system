@@ -1,0 +1,30 @@
+# --- Node / React Native ---
+node_modules/
+.expo/
+dist/
+npm-debug.log
+yarn-error.log
+*.log
+
+# Android
+app/android/.gradle/
+app/android/app/build/
+app/android/build/
+app/android/local.properties
+app/android/.idea/
+*.iml
+
+# iOS
+app/ios/build/
+app/ios/Pods/
+app/ios/*.xcworkspace
+app/ios/*.xcuserstate
+
+# --- Arduino ---
+firmware/**/build/
+*.hex
+*.bin
+
+# --- OS / editor ---
+.DS_Store
+.vscode/
