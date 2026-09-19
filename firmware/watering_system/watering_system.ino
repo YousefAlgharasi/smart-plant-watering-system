@@ -30,17 +30,20 @@
 // 0 for normal operation.
 #define DEBUG_SOIL_RAW 0
 
-// ---------- WiFi (optional — for using the dashboard from your home network
-// without needing to be in Bluetooth range) ----------
-// Fill in your network's credentials before uploading. Leave WIFI_SSID empty
-// ("") to skip WiFi entirely and run Bluetooth-only, exactly as before.
+// ---------- WiFi (STA optional, AP always on — both run alongside Bluetooth,
+// which keeps working unchanged either way) ----------
+// STA: fill in your home network's credentials before uploading to also reach
+// the device from your home WiFi at http://plantwaterer.local/. Leave
+// WIFI_SSID empty ("") to skip STA — the AP below still always starts.
 // Never commit your real credentials — keep this file local to your device.
 #define WIFI_SSID     ""
 #define WIFI_PASSWORD ""
-// Once connected, the dashboard reaches the device at http://plantwaterer.local/
-// (or by whatever IP Serial prints on boot, if mDNS isn't supported on your
-// network/router).
 #define WIFI_HOSTNAME "plantwaterer"
+// AP: the ESP32 always creates this network too, so a phone can connect
+// directly with no router or internet at all, at the fixed address below.
+#define AP_SSID     "SmartGrow"
+#define AP_PASSWORD "12345678"
+#define AP_IP_ADDR  192, 168, 4, 1
 
 // ---------- BLE UUIDs (must match the app's src/constants/ble.ts) ----------
 #define SERVICE_UUID      "12345678-1234-5678-1234-56789abc0000"
@@ -135,6 +138,7 @@ unsigned long pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
 int soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT; // stop any watering immediately once soil hits this %
 unsigned long minWaterIntervalMs = DEFAULT_MIN_WATER_INTERVAL_MS; // cooldown between AUTO waterings (manual bypasses it)
 unsigned long sensorIntervalMs = DEFAULT_SENSOR_INTERVAL_MS; // how often sensors are read/published
+bool systemEnabled = true; // master switch: disables auto-watering (conditions + schedule) and force-stops the pump
 
 // ---------- Schedule ----------
 bool schedEnabled = true;
@@ -223,6 +227,7 @@ void loadConfig() {
   soilMaxPercent = prefs.getInt("soilMax", DEFAULT_SOIL_MAX_PERCENT);
   minWaterIntervalMs = prefs.getULong("cooldownMs", DEFAULT_MIN_WATER_INTERVAL_MS);
   sensorIntervalMs = prefs.getULong("sensorIntMs", DEFAULT_SENSOR_INTERVAL_MS);
+  systemEnabled = prefs.getBool("sysEnabled", true);
   schedEnabled = prefs.getBool("schedOn", true);
   schedMode = prefs.getString("schedMode", "daily");
   schedHour = prefs.getInt("schedHour", 5);
@@ -245,6 +250,7 @@ void saveConfig() {
   prefs.putInt("soilMax", soilMaxPercent);
   prefs.putULong("cooldownMs", minWaterIntervalMs);
   prefs.putULong("sensorIntMs", sensorIntervalMs);
+  prefs.putBool("sysEnabled", systemEnabled);
   prefs.putBool("schedOn", schedEnabled);
   prefs.putString("schedMode", schedMode);
   prefs.putInt("schedHour", schedHour);
@@ -329,6 +335,7 @@ String buildConfigJson() {
   doc["soilMaxPercent"] = soilMaxPercent;
   doc["cooldownMs"] = minWaterIntervalMs;
   doc["sensorIntervalMs"] = sensorIntervalMs;
+  doc["systemEnabled"] = systemEnabled;
 
   JsonObject sched = doc.createNestedObject("schedule");
   sched["enabled"] = schedEnabled;
@@ -362,6 +369,7 @@ void resetToDefaults() {
   soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT;
   minWaterIntervalMs = DEFAULT_MIN_WATER_INTERVAL_MS;
   sensorIntervalMs = DEFAULT_SENSOR_INTERVAL_MS;
+  systemEnabled = true;
   schedEnabled = true;
   schedMode = "daily";
   schedHour = 5;
@@ -401,6 +409,7 @@ bool applyConfigJson(const String &value) {
   if (doc.containsKey("soilMaxPercent")) soilMaxPercent = doc["soilMaxPercent"];
   if (doc.containsKey("cooldownMs")) minWaterIntervalMs = doc["cooldownMs"];
   if (doc.containsKey("sensorIntervalMs")) sensorIntervalMs = doc["sensorIntervalMs"];
+  if (doc.containsKey("systemEnabled")) systemEnabled = doc["systemEnabled"];
 
   if (doc.containsKey("schedule")) {
     JsonObject sched = doc["schedule"];
@@ -421,7 +430,20 @@ bool applyConfigJson(const String &value) {
 
   saveConfig();
   pushConfig();
+  if (!systemEnabled) pendingStopNow = true; // harmless no-op if the pump isn't running
   return true;
+}
+
+// Single place that changes systemEnabled, so every control path (BLE
+// command, HTTP /system/on|off, a future app) enforces the same rule:
+// disabling it force-stops the pump via the exact same async path STOP_NOW
+// already uses, instead of a second, separate stop mechanism.
+void setSystemEnabled(bool enabled) {
+  systemEnabled = enabled;
+  saveConfig();
+  pushConfig();
+  if (!systemEnabled) pendingStopNow = true;
+  logLine(String("[system] systemEnabled=") + String(systemEnabled));
 }
 
 // Shared by both the BLE COMMAND characteristic and HTTP POST /api/command.
@@ -434,6 +456,10 @@ void applyCommand(const String &cmd) {
     pendingReset = true;
   } else if (cmd == "REFRESH") {
     pendingRefresh = true;
+  } else if (cmd == "SYSTEM_ON") {
+    setSystemEnabled(true);
+  } else if (cmd == "SYSTEM_OFF") {
+    setSystemEnabled(false);
   }
 }
 
@@ -630,7 +656,7 @@ void checkAutoWater(int moisture) {
     + ") pumpActive=" + String(pumpActive);
   logLine(line);
 
-  if (pumpActive) return;
+  if (!systemEnabled || pumpActive) return;
   if (tempOk && humOk && soilDry) startWatering(false);
 }
 
@@ -646,7 +672,7 @@ void publishSensorData() {
 
 // ---------- Scheduled watering ----------
 void checkSchedule() {
-  if (!timeSynced || !schedEnabled || pumpActive) return;
+  if (!systemEnabled || !timeSynced || !schedEnabled || pumpActive) return;
 
   unsigned long epoch = currentLocalEpoch();
   int dow = dayOfWeekFor(epoch);
@@ -758,8 +784,72 @@ void handleRoot() {
     "with host " WIFI_HOSTNAME ".local (or this device's IP address).");
 }
 
+// Minimal status/control surface for simple external clients (e.g. a plain
+// script or a future app) that don't need the full /api/* schema above.
+// Backed by the exact same state and functions as everything else — no
+// second pump/system implementation.
+String buildStatusJson() {
+  StaticJsonDocument<192> doc;
+  doc["systemEnabled"] = systemEnabled;
+  doc["pump"] = pumpOn;
+  doc["temp"] = lastTemp;
+  doc["hum"] = lastHum;
+  doc["soil"] = readMoisturePercent();
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+void handleStatusGet() {
+  sendCorsHeaders();
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
+void handleSystemOnPost() {
+  sendCorsHeaders();
+  setSystemEnabled(true);
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
+void handleSystemOffPost() {
+  sendCorsHeaders();
+  setSystemEnabled(false);
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
+void handlePumpOnPost() {
+  sendCorsHeaders();
+  if (!systemEnabled) {
+    webServer.send(403, "application/json", "{\"error\":\"system disabled\"}");
+    return;
+  }
+  applyCommand("WATER_NOW");
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
+void handlePumpOffPost() {
+  sendCorsHeaders();
+  applyCommand("STOP_NOW");
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
 void setupWebServer() {
   webServer.on("/", HTTP_GET, handleRoot);
+
+  webServer.on("/status", HTTP_GET, handleStatusGet);
+  webServer.on("/status", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/system/on", HTTP_POST, handleSystemOnPost);
+  webServer.on("/system/on", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/system/off", HTTP_POST, handleSystemOffPost);
+  webServer.on("/system/off", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/pump/on", HTTP_POST, handlePumpOnPost);
+  webServer.on("/pump/on", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/pump/off", HTTP_POST, handlePumpOffPost);
+  webServer.on("/pump/off", HTTP_OPTIONS, handleCorsPreflight);
 
   webServer.on("/api/sensor", HTTP_GET, handleApiSensorGet);
   webServer.on("/api/sensor", HTTP_OPTIONS, handleCorsPreflight);
@@ -782,36 +872,44 @@ void setupWebServer() {
 }
 
 void setupWifi() {
+  // AP always starts (no router/internet needed, matches the pre-set
+  // 192.168.4.1 phones connect to directly); STA is optional and additive —
+  // WIFI_AP_STA runs both concurrently without disturbing each other.
+  WiFi.mode(WIFI_AP_STA);
+
+  IPAddress apIP(AP_IP_ADDR);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  Serial.print("WiFi AP: SSID='" AP_SSID "' IP=");
+  Serial.println(WiFi.softAPIP());
+
   if (strlen(WIFI_SSID) == 0) {
-    Serial.println("WiFi: no SSID configured in firmware — running Bluetooth-only.");
-    return;
-  }
-
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname(WIFI_HOSTNAME);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("WiFi: connecting to '" WIFI_SSID "'");
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(300);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi: connection failed after 15s — continuing Bluetooth-only.");
-    return;
-  }
-
-  Serial.print("WiFi connected. IP address: ");
-  Serial.println(WiFi.localIP());
-
-  if (MDNS.begin(WIFI_HOSTNAME)) {
-    MDNS.addService("http", "tcp", 80);
-    Serial.println("mDNS ready: connect the dashboard to http://" WIFI_HOSTNAME ".local/");
+    Serial.println("WiFi STA: no SSID configured — AP-only (plus Bluetooth, unaffected).");
   } else {
-    Serial.println("mDNS failed to start — connect using the IP address above instead.");
+    WiFi.setHostname(WIFI_HOSTNAME);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.print("WiFi STA: connecting to '" WIFI_SSID "'");
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+      delay(300);
+      Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("WiFi STA connected. IP address: ");
+      Serial.println(WiFi.localIP());
+
+      if (MDNS.begin(WIFI_HOSTNAME)) {
+        MDNS.addService("http", "tcp", 80);
+        Serial.println("mDNS ready: connect the dashboard to http://" WIFI_HOSTNAME ".local/");
+      } else {
+        Serial.println("mDNS failed to start — connect using the STA IP address above instead.");
+      }
+    } else {
+      Serial.println("WiFi STA: connection failed after 15s — AP mode is still available.");
+    }
   }
 
   setupWebServer();
@@ -846,6 +944,7 @@ void setup() {
     + " soilMaxPercent=" + String(soilMaxPercent)
     + " minWaterIntervalMs=" + String(minWaterIntervalMs)
     + " sensorIntervalMs=" + String(sensorIntervalMs)
+    + " systemEnabled=" + String(systemEnabled)
     + " historyCount=" + String(historyCount));
 
   NimBLEDevice::init(DEVICE_NAME);
@@ -906,7 +1005,7 @@ void setup() {
 
   Serial.println("BLE advertising started as '" DEVICE_NAME "'");
 
-  setupWifi(); // no-op (Bluetooth-only) unless WIFI_SSID is filled in above
+  setupWifi(); // starts the AP unconditionally; STA only if WIFI_SSID is filled in above
 }
 
 void loop() {
