@@ -5,6 +5,9 @@
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
 
 // ---------- Pins ----------
 #define DHTPIN 16
@@ -26,6 +29,21 @@
 // you can capture real dry-air/wet-soil readings for calibration above. Leave at
 // 0 for normal operation.
 #define DEBUG_SOIL_RAW 0
+
+// ---------- WiFi (STA optional, AP always on — both run alongside Bluetooth,
+// which keeps working unchanged either way) ----------
+// STA: fill in your home network's credentials before uploading to also reach
+// the device from your home WiFi at http://plantwaterer.local/. Leave
+// WIFI_SSID empty ("") to skip STA — the AP below still always starts.
+// Never commit your real credentials — keep this file local to your device.
+#define WIFI_SSID     ""
+#define WIFI_PASSWORD ""
+#define WIFI_HOSTNAME "plantwaterer"
+// AP: the ESP32 always creates this network too, so a phone can connect
+// directly with no router or internet at all, at the fixed address below.
+#define AP_SSID     "SmartGrow"
+#define AP_PASSWORD "12345678"
+#define AP_IP_ADDR  192, 168, 4, 1
 
 // ---------- BLE UUIDs (must match the app's src/constants/ble.ts) ----------
 #define SERVICE_UUID      "12345678-1234-5678-1234-56789abc0000"
@@ -82,6 +100,21 @@ NimBLECharacteristic *logChar;
 
 bool deviceConnected = false;
 
+// ---------- WiFi / local HTTP API ----------
+// Runs alongside Bluetooth (not instead of it) so the dashboard works from
+// anywhere on the same WiFi network, not just within BLE range. Every route
+// mirrors a BLE characteristic 1:1 and reuses the exact same apply/build
+// functions, so the two transports can never drift out of sync.
+WebServer webServer(80);
+bool wifiReady = false;
+
+#define LOG_BUFFER_CAPACITY 50
+String logBuffer[LOG_BUFFER_CAPACITY];
+uint32_t logBufferSeq[LOG_BUFFER_CAPACITY];
+uint8_t logBufferHead = 0;
+uint8_t logBufferCount = 0;
+uint32_t logSeqCounter = 0;
+
 // ---------- Watering history (ring buffer, persisted) ----------
 struct WateringLogEntry {
   uint32_t epoch; // 0 means "time unknown" (device hadn't been time-synced yet)
@@ -105,6 +138,7 @@ unsigned long pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
 int soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT; // stop any watering immediately once soil hits this %
 unsigned long minWaterIntervalMs = DEFAULT_MIN_WATER_INTERVAL_MS; // cooldown between AUTO waterings (manual bypasses it)
 unsigned long sensorIntervalMs = DEFAULT_SENSOR_INTERVAL_MS; // how often sensors are read/published
+bool systemEnabled = true; // master switch: disables auto-watering (conditions + schedule) and force-stops the pump
 
 // ---------- Schedule ----------
 bool schedEnabled = true;
@@ -162,6 +196,13 @@ void startWatering(bool manual);
 // app's live "Console" tab — testing/debugging only, no functional effect) ----------
 void logLine(const String &msg) {
   Serial.println(msg);
+
+  logSeqCounter++;
+  logBuffer[logBufferHead] = msg;
+  logBufferSeq[logBufferHead] = logSeqCounter;
+  logBufferHead = (logBufferHead + 1) % LOG_BUFFER_CAPACITY;
+  if (logBufferCount < LOG_BUFFER_CAPACITY) logBufferCount++;
+
   if (deviceConnected) {
     // BLE notifications are capped by the negotiated ATT MTU (default as low
     // as 20-ish bytes, often 200+ in practice); a message longer than that
@@ -186,6 +227,7 @@ void loadConfig() {
   soilMaxPercent = prefs.getInt("soilMax", DEFAULT_SOIL_MAX_PERCENT);
   minWaterIntervalMs = prefs.getULong("cooldownMs", DEFAULT_MIN_WATER_INTERVAL_MS);
   sensorIntervalMs = prefs.getULong("sensorIntMs", DEFAULT_SENSOR_INTERVAL_MS);
+  systemEnabled = prefs.getBool("sysEnabled", true);
   schedEnabled = prefs.getBool("schedOn", true);
   schedMode = prefs.getString("schedMode", "daily");
   schedHour = prefs.getInt("schedHour", 5);
@@ -208,6 +250,7 @@ void saveConfig() {
   prefs.putInt("soilMax", soilMaxPercent);
   prefs.putULong("cooldownMs", minWaterIntervalMs);
   prefs.putULong("sensorIntMs", sensorIntervalMs);
+  prefs.putBool("sysEnabled", systemEnabled);
   prefs.putBool("schedOn", schedEnabled);
   prefs.putString("schedMode", schedMode);
   prefs.putInt("schedHour", schedHour);
@@ -237,7 +280,7 @@ void saveHistory() {
   prefs.end();
 }
 
-void updateHistoryChar() {
+String buildHistoryJson() {
   // Oldest-first. When the buffer is full, historyHead already points at the
   // oldest surviving entry (the next slot to be overwritten); otherwise the
   // oldest entry is always at index 0.
@@ -256,9 +299,12 @@ void updateHistoryChar() {
 
   String out;
   serializeJson(doc, out);
-  historyChar->setValue(out.c_str());
-
   logLine("[history] entries=" + String(historyCount) + " overflowed=" + String(doc.overflowed()) + " json=" + out);
+  return out;
+}
+
+void updateHistoryChar() {
+  historyChar->setValue(buildHistoryJson().c_str());
 }
 
 void recordWateringEvent(int soilAfter) {
@@ -276,7 +322,7 @@ void recordWateringEvent(int soilAfter) {
   updateHistoryChar();
 }
 
-void pushConfig() {
+String buildConfigJson() {
   StaticJsonDocument<768> doc;
   doc["tempMin"] = tempMin;
   doc["tempMax"] = tempMax;
@@ -289,6 +335,7 @@ void pushConfig() {
   doc["soilMaxPercent"] = soilMaxPercent;
   doc["cooldownMs"] = minWaterIntervalMs;
   doc["sensorIntervalMs"] = sensorIntervalMs;
+  doc["systemEnabled"] = systemEnabled;
 
   JsonObject sched = doc.createNestedObject("schedule");
   sched["enabled"] = schedEnabled;
@@ -301,6 +348,11 @@ void pushConfig() {
 
   String out;
   serializeJson(doc, out);
+  return out;
+}
+
+void pushConfig() {
+  String out = buildConfigJson();
   configChar->setValue(out.c_str());
   if (deviceConnected) configChar->notify();
 }
@@ -317,6 +369,7 @@ void resetToDefaults() {
   soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT;
   minWaterIntervalMs = DEFAULT_MIN_WATER_INTERVAL_MS;
   sensorIntervalMs = DEFAULT_SENSOR_INTERVAL_MS;
+  systemEnabled = true;
   schedEnabled = true;
   schedMode = "daily";
   schedHour = 5;
@@ -339,70 +392,102 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
 };
 
+// Shared by both the BLE CONFIG characteristic and the HTTP POST /api/config
+// route, so the two transports can never apply config differently.
+bool applyConfigJson(const String &value) {
+  StaticJsonDocument<768> doc;
+  if (deserializeJson(doc, value) != DeserializationError::Ok) return false;
+
+  if (doc.containsKey("tempMin")) tempMin = doc["tempMin"];
+  if (doc.containsKey("tempMax")) tempMax = doc["tempMax"];
+  if (doc.containsKey("humMin")) humMin = doc["humMin"];
+  if (doc.containsKey("humMax")) humMax = doc["humMax"];
+  if (doc.containsKey("soilThreshold")) soilThreshold = doc["soilThreshold"];
+  if (doc.containsKey("pumpMode")) pumpMode = doc["pumpMode"].as<String>();
+  if (doc.containsKey("soilWetTarget")) soilWetTarget = doc["soilWetTarget"];
+  if (doc.containsKey("pumpDurationMs")) pumpDurationMs = doc["pumpDurationMs"];
+  if (doc.containsKey("soilMaxPercent")) soilMaxPercent = doc["soilMaxPercent"];
+  if (doc.containsKey("cooldownMs")) minWaterIntervalMs = doc["cooldownMs"];
+  if (doc.containsKey("sensorIntervalMs")) sensorIntervalMs = doc["sensorIntervalMs"];
+  if (doc.containsKey("systemEnabled")) systemEnabled = doc["systemEnabled"];
+
+  if (doc.containsKey("schedule")) {
+    JsonObject sched = doc["schedule"];
+    if (sched.containsKey("enabled")) schedEnabled = sched["enabled"];
+    if (sched.containsKey("mode")) schedMode = sched["mode"].as<String>();
+    if (sched.containsKey("hour")) schedHour = sched["hour"];
+    if (sched.containsKey("minute")) schedMinute = sched["minute"];
+    if (sched.containsKey("intervalHours")) schedIntervalHours = sched["intervalHours"];
+    if (sched.containsKey("days")) {
+      JsonArray days = sched["days"];
+      uint8_t newMask = 0;
+      for (int i = 0; i < 7 && i < (int)days.size(); i++) {
+        if (days[i].as<bool>()) newMask |= (1 << i);
+      }
+      schedDaysMask = newMask;
+    }
+  }
+
+  saveConfig();
+  pushConfig();
+  if (!systemEnabled) pendingStopNow = true; // harmless no-op if the pump isn't running
+  return true;
+}
+
+// Single place that changes systemEnabled, so every control path (BLE
+// command, HTTP /system/on|off, a future app) enforces the same rule:
+// disabling it force-stops the pump via the exact same async path STOP_NOW
+// already uses, instead of a second, separate stop mechanism.
+void setSystemEnabled(bool enabled) {
+  systemEnabled = enabled;
+  saveConfig();
+  pushConfig();
+  if (!systemEnabled) pendingStopNow = true;
+  logLine(String("[system] systemEnabled=") + String(systemEnabled));
+}
+
+// Shared by both the BLE COMMAND characteristic and HTTP POST /api/command.
+void applyCommand(const String &cmd) {
+  if (cmd == "WATER_NOW") {
+    pendingWaterNow = true;
+  } else if (cmd == "STOP_NOW") {
+    pendingStopNow = true;
+  } else if (cmd == "RESET_DEFAULTS") {
+    pendingReset = true;
+  } else if (cmd == "REFRESH") {
+    pendingRefresh = true;
+  } else if (cmd == "SYSTEM_ON") {
+    setSystemEnabled(true);
+  } else if (cmd == "SYSTEM_OFF") {
+    setSystemEnabled(false);
+  }
+}
+
+// Shared by both the BLE TIME characteristic and HTTP POST /api/time.
+void applyTimeSync(const String &value) {
+  unsigned long epoch = strtoul(value.c_str(), nullptr, 10);
+  if (epoch > 0) {
+    timeSyncEpoch = epoch;
+    timeSyncMillis = millis();
+    timeSynced = true;
+  }
+}
+
 class ConfigCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &connInfo) override {
-    String value = c->getValue().c_str();
-    StaticJsonDocument<768> doc;
-    if (deserializeJson(doc, value) == DeserializationError::Ok) {
-      if (doc.containsKey("tempMin")) tempMin = doc["tempMin"];
-      if (doc.containsKey("tempMax")) tempMax = doc["tempMax"];
-      if (doc.containsKey("humMin")) humMin = doc["humMin"];
-      if (doc.containsKey("humMax")) humMax = doc["humMax"];
-      if (doc.containsKey("soilThreshold")) soilThreshold = doc["soilThreshold"];
-      if (doc.containsKey("pumpMode")) pumpMode = doc["pumpMode"].as<String>();
-      if (doc.containsKey("soilWetTarget")) soilWetTarget = doc["soilWetTarget"];
-      if (doc.containsKey("pumpDurationMs")) pumpDurationMs = doc["pumpDurationMs"];
-      if (doc.containsKey("soilMaxPercent")) soilMaxPercent = doc["soilMaxPercent"];
-      if (doc.containsKey("cooldownMs")) minWaterIntervalMs = doc["cooldownMs"];
-      if (doc.containsKey("sensorIntervalMs")) sensorIntervalMs = doc["sensorIntervalMs"];
-
-      if (doc.containsKey("schedule")) {
-        JsonObject sched = doc["schedule"];
-        if (sched.containsKey("enabled")) schedEnabled = sched["enabled"];
-        if (sched.containsKey("mode")) schedMode = sched["mode"].as<String>();
-        if (sched.containsKey("hour")) schedHour = sched["hour"];
-        if (sched.containsKey("minute")) schedMinute = sched["minute"];
-        if (sched.containsKey("intervalHours")) schedIntervalHours = sched["intervalHours"];
-        if (sched.containsKey("days")) {
-          JsonArray days = sched["days"];
-          uint8_t newMask = 0;
-          for (int i = 0; i < 7 && i < (int)days.size(); i++) {
-            if (days[i].as<bool>()) newMask |= (1 << i);
-          }
-          schedDaysMask = newMask;
-        }
-      }
-
-      saveConfig();
-      pushConfig();
-    }
+    applyConfigJson(c->getValue().c_str());
   }
 };
 
 class CommandCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &connInfo) override {
-    String cmd = c->getValue().c_str();
-    if (cmd == "WATER_NOW") {
-      pendingWaterNow = true;
-    } else if (cmd == "STOP_NOW") {
-      pendingStopNow = true;
-    } else if (cmd == "RESET_DEFAULTS") {
-      pendingReset = true;
-    } else if (cmd == "REFRESH") {
-      pendingRefresh = true;
-    }
+    applyCommand(c->getValue().c_str());
   }
 };
 
 class TimeCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &connInfo) override {
-    String value = c->getValue().c_str();
-    unsigned long epoch = strtoul(value.c_str(), nullptr, 10);
-    if (epoch > 0) {
-      timeSyncEpoch = epoch;
-      timeSyncMillis = millis();
-      timeSynced = true;
-    }
+    applyTimeSync(c->getValue().c_str());
   }
 };
 
@@ -530,7 +615,7 @@ void updatePump() {
 }
 
 // ---------- Main sensor + decision cycle ----------
-void notifySensor(int moisture) {
+String buildSensorJson(int moisture) {
   StaticJsonDocument<128> doc;
   doc["temp"] = lastTemp;
   doc["hum"] = lastHum;
@@ -538,6 +623,11 @@ void notifySensor(int moisture) {
   doc["pump"] = pumpOn;
   String out;
   serializeJson(doc, out);
+  return out;
+}
+
+void notifySensor(int moisture) {
+  String out = buildSensorJson(moisture);
 
   if (deviceConnected) {
     sensorChar->setValue(out.c_str());
@@ -566,7 +656,7 @@ void checkAutoWater(int moisture) {
     + ") pumpActive=" + String(pumpActive);
   logLine(line);
 
-  if (pumpActive) return;
+  if (!systemEnabled || pumpActive) return;
   if (tempOk && humOk && soilDry) startWatering(false);
 }
 
@@ -582,7 +672,7 @@ void publishSensorData() {
 
 // ---------- Scheduled watering ----------
 void checkSchedule() {
-  if (!timeSynced || !schedEnabled || pumpActive) return;
+  if (!systemEnabled || !timeSynced || !schedEnabled || pumpActive) return;
 
   unsigned long epoch = currentLocalEpoch();
   int dow = dayOfWeekFor(epoch);
@@ -606,6 +696,225 @@ void checkSchedule() {
       startWatering(false);
     }
   }
+}
+
+// ---------- WiFi HTTP API (mirrors the BLE service for same-network access) ----------
+void sendCorsHeaders() {
+  // Lets the dashboard (opened as a local file, origin "null") fetch() this
+  // device across origins — there's no user data at stake here beyond plant
+  // watering settings, so a wildcard is fine for a single-user home device.
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  webServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+void handleCorsPreflight() {
+  sendCorsHeaders();
+  webServer.send(204);
+}
+
+void handleApiSensorGet() {
+  sendCorsHeaders();
+  webServer.send(200, "application/json", buildSensorJson(readMoisturePercent()));
+}
+
+void handleApiConfigGet() {
+  sendCorsHeaders();
+  webServer.send(200, "application/json", buildConfigJson());
+}
+
+void handleApiConfigPost() {
+  sendCorsHeaders();
+  bool ok = applyConfigJson(webServer.arg("plain"));
+  webServer.send(ok ? 200 : 400, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+void handleApiCommandPost() {
+  sendCorsHeaders();
+  String body = webServer.arg("plain");
+  body.trim();
+  // Accepts either a bare command string body or {"cmd":"WATER_NOW"} JSON.
+  if (body.length() > 0 && body[0] == '{') {
+    StaticJsonDocument<128> doc;
+    if (deserializeJson(doc, body) == DeserializationError::Ok && doc.containsKey("cmd")) {
+      applyCommand(doc["cmd"].as<String>());
+    }
+  } else {
+    applyCommand(body);
+  }
+  webServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleApiTimePost() {
+  sendCorsHeaders();
+  applyTimeSync(webServer.arg("plain"));
+  webServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleApiHistoryGet() {
+  sendCorsHeaders();
+  webServer.send(200, "application/json", buildHistoryJson());
+}
+
+void handleApiLogGet() {
+  sendCorsHeaders();
+  uint32_t since = 0;
+  if (webServer.hasArg("since")) since = strtoul(webServer.arg("since").c_str(), nullptr, 10);
+
+  StaticJsonDocument<3072> doc;
+  JsonArray arr = doc.to<JsonArray>();
+  int oldestIndex = (logBufferCount < LOG_BUFFER_CAPACITY) ? 0 : logBufferHead;
+  for (int i = 0; i < logBufferCount; i++) {
+    int idx = (oldestIndex + i) % LOG_BUFFER_CAPACITY;
+    if (logBufferSeq[idx] > since) {
+      JsonObject o = arr.createNestedObject();
+      o["seq"] = logBufferSeq[idx];
+      o["text"] = logBuffer[idx];
+    }
+  }
+  String out;
+  serializeJson(doc, out);
+  webServer.send(200, "application/json", out);
+}
+
+void handleRoot() {
+  sendCorsHeaders();
+  webServer.send(200, "text/plain",
+    "PlantWaterer is running. Open the dashboard HTML file and use \"Connect via WiFi\" "
+    "with host " WIFI_HOSTNAME ".local (or this device's IP address).");
+}
+
+// Minimal status/control surface for simple external clients (e.g. a plain
+// script or a future app) that don't need the full /api/* schema above.
+// Backed by the exact same state and functions as everything else — no
+// second pump/system implementation.
+String buildStatusJson() {
+  StaticJsonDocument<192> doc;
+  doc["systemEnabled"] = systemEnabled;
+  doc["pump"] = pumpOn;
+  doc["temp"] = lastTemp;
+  doc["hum"] = lastHum;
+  doc["soil"] = readMoisturePercent();
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+void handleStatusGet() {
+  sendCorsHeaders();
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
+void handleSystemOnPost() {
+  sendCorsHeaders();
+  setSystemEnabled(true);
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
+void handleSystemOffPost() {
+  sendCorsHeaders();
+  setSystemEnabled(false);
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
+void handlePumpOnPost() {
+  sendCorsHeaders();
+  if (!systemEnabled) {
+    webServer.send(403, "application/json", "{\"error\":\"system disabled\"}");
+    return;
+  }
+  applyCommand("WATER_NOW");
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
+void handlePumpOffPost() {
+  sendCorsHeaders();
+  applyCommand("STOP_NOW");
+  webServer.send(200, "application/json", buildStatusJson());
+}
+
+void setupWebServer() {
+  webServer.on("/", HTTP_GET, handleRoot);
+
+  webServer.on("/status", HTTP_GET, handleStatusGet);
+  webServer.on("/status", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/system/on", HTTP_POST, handleSystemOnPost);
+  webServer.on("/system/on", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/system/off", HTTP_POST, handleSystemOffPost);
+  webServer.on("/system/off", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/pump/on", HTTP_POST, handlePumpOnPost);
+  webServer.on("/pump/on", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/pump/off", HTTP_POST, handlePumpOffPost);
+  webServer.on("/pump/off", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/api/sensor", HTTP_GET, handleApiSensorGet);
+  webServer.on("/api/sensor", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/api/config", HTTP_GET, handleApiConfigGet);
+  webServer.on("/api/config", HTTP_POST, handleApiConfigPost);
+  webServer.on("/api/config", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/api/command", HTTP_POST, handleApiCommandPost);
+  webServer.on("/api/command", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/api/time", HTTP_POST, handleApiTimePost);
+  webServer.on("/api/time", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/api/history", HTTP_GET, handleApiHistoryGet);
+  webServer.on("/api/history", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/api/log", HTTP_GET, handleApiLogGet);
+  webServer.on("/api/log", HTTP_OPTIONS, handleCorsPreflight);
+}
+
+void setupWifi() {
+  // AP always starts (no router/internet needed, matches the pre-set
+  // 192.168.4.1 phones connect to directly); STA is optional and additive —
+  // WIFI_AP_STA runs both concurrently without disturbing each other.
+  WiFi.mode(WIFI_AP_STA);
+
+  IPAddress apIP(AP_IP_ADDR);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  Serial.print("WiFi AP: SSID='" AP_SSID "' IP=");
+  Serial.println(WiFi.softAPIP());
+
+  if (strlen(WIFI_SSID) == 0) {
+    Serial.println("WiFi STA: no SSID configured — AP-only (plus Bluetooth, unaffected).");
+  } else {
+    WiFi.setHostname(WIFI_HOSTNAME);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.print("WiFi STA: connecting to '" WIFI_SSID "'");
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+      delay(300);
+      Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("WiFi STA connected. IP address: ");
+      Serial.println(WiFi.localIP());
+
+      if (MDNS.begin(WIFI_HOSTNAME)) {
+        MDNS.addService("http", "tcp", 80);
+        Serial.println("mDNS ready: connect the dashboard to http://" WIFI_HOSTNAME ".local/");
+      } else {
+        Serial.println("mDNS failed to start — connect using the STA IP address above instead.");
+      }
+    } else {
+      Serial.println("WiFi STA: connection failed after 15s — AP mode is still available.");
+    }
+  }
+
+  setupWebServer();
+  webServer.begin();
+  wifiReady = true;
 }
 
 void setup() {
@@ -635,6 +944,7 @@ void setup() {
     + " soilMaxPercent=" + String(soilMaxPercent)
     + " minWaterIntervalMs=" + String(minWaterIntervalMs)
     + " sensorIntervalMs=" + String(sensorIntervalMs)
+    + " systemEnabled=" + String(systemEnabled)
     + " historyCount=" + String(historyCount));
 
   NimBLEDevice::init(DEVICE_NAME);
@@ -694,9 +1004,13 @@ void setup() {
   NimBLEDevice::startAdvertising();
 
   Serial.println("BLE advertising started as '" DEVICE_NAME "'");
+
+  setupWifi(); // starts the AP unconditionally; STA only if WIFI_SSID is filled in above
 }
 
 void loop() {
+  if (wifiReady) webServer.handleClient();
+
 #if DEBUG_SOIL_RAW
   Serial.println(analogRead(SOIL_PIN));
   delay(200);
