@@ -116,7 +116,12 @@ unsigned long timeSyncMillis = 0;
 bool timeSynced = false;
 
 unsigned long lastCheck = 0;
-unsigned long lastWaterMillis = 0;
+// Sentinel for "never watered yet": deliberately wraps below 0 so that on
+// boot, millis() - lastWaterMillis is already >= MIN_WATER_INTERVAL_MS. A
+// plain 0 here would make a fresh boot look like "watered at time zero",
+// silently blocking auto-watering for the first 10 minutes after every
+// power-on/reset even when every condition is already met.
+unsigned long lastWaterMillis = 0 - MIN_WATER_INTERVAL_MS;
 
 float lastTemp = NAN;
 float lastHum = NAN;
@@ -410,6 +415,8 @@ void startWatering(bool manual) {
 
   unsigned long now = millis();
   if (!manual && (now - lastWaterMillis < MIN_WATER_INTERVAL_MS)) {
+    Serial.print("[auto-water] blocked by cooldown, ms remaining=");
+    Serial.println(MIN_WATER_INTERVAL_MS - (now - lastWaterMillis));
     return; // auto watering (condition or schedule) is on cooldown, ignore for now
   }
 
