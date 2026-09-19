@@ -65,6 +65,11 @@
   .conn-dot {
     width: 8px; height: 8px; border-radius: 50%; background: var(--color-primary);
     box-shadow: 0 0 0 3px rgba(46, 125, 50, 0.2); flex-shrink: 0;
+    animation: dot-pulse 2s ease-in-out infinite;
+  }
+  @keyframes dot-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(46, 125, 50, 0.35); }
+    50% { box-shadow: 0 0 0 5px rgba(46, 125, 50, 0); }
   }
   #device-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
 
@@ -114,17 +119,58 @@
   .danger-btn:active { background: var(--color-danger-dark); }
   button:disabled { opacity: 0.6; cursor: not-allowed; }
 
+  /* ---------- Tabs ---------- */
+  .tabbar {
+    display: flex; gap: 4px; margin-bottom: 16px; background: var(--color-surface);
+    border-radius: var(--radius); padding: 4px; box-shadow: var(--shadow);
+  }
+  .tab-btn {
+    flex: 1; border: none; background: none; padding: 10px 0; border-radius: 10px;
+    font-size: 14px; font-weight: 700; color: var(--color-text-muted); cursor: pointer;
+  }
+  .tab-btn.active { background: var(--color-primary); color: #fff; }
+  .tab-panel { animation: fade-in 0.15s ease-out; }
+
+  .update-ticker {
+    text-align: center; font-size: 12px; color: var(--color-text-muted);
+    margin: -4px 0 14px;
+  }
+
   .grid {
     display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px;
   }
   .card {
     background: var(--color-surface); border-radius: var(--radius); box-shadow: var(--shadow);
     padding: 16px; display: flex; flex-direction: column; gap: 6px;
+    transition: box-shadow 0.2s;
   }
   .card.wide { grid-column: 1 / -1; }
   .card .label { font-size: 13px; color: var(--color-text-muted); }
   .card .value { font-size: 22px; font-weight: 700; }
   .card .value.pump-on { color: var(--color-accent); }
+
+  @keyframes card-flash {
+    0% { box-shadow: 0 0 0 3px rgba(46, 125, 50, 0.35); }
+    100% { box-shadow: var(--shadow); }
+  }
+  .card.flash { animation: card-flash 0.7s ease-out; }
+
+  .sparkline { width: 100%; height: 28px; display: block; margin-top: 2px; overflow: visible; }
+  .spark-line { fill: none; stroke: var(--color-text-muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .spark-dot { fill: var(--color-primary); }
+
+  .pump-progress {
+    height: 6px; border-radius: 999px; background: var(--color-border);
+    overflow: hidden; margin-top: 4px;
+  }
+  .pump-progress-bar {
+    height: 100%; width: 40%; border-radius: 999px; background: var(--color-accent);
+    animation: pump-indeterminate 1.1s ease-in-out infinite;
+  }
+  @keyframes pump-indeterminate {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(360%); }
+  }
 
   .actions { display: flex; gap: 10px; margin-bottom: 20px; }
   .actions .primary-btn, .actions .accent-btn { flex: 1; }
@@ -137,12 +183,13 @@
 
   .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
   .field-label { display: block; font-size: 13px; color: var(--color-text-muted); margin: 16px 0 6px; }
+  .hint-small { font-size: 12px; color: var(--color-text-muted); margin: 10px 0 0; }
 
-  input[type="number"] {
+  input[type="number"], input[type="time"], select {
     width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--color-border);
-    font-size: 16px; background: var(--color-bg); color: var(--color-text);
+    font-size: 16px; background: var(--color-bg); color: var(--color-text); font-family: inherit;
   }
-  input[type="number"]:disabled { opacity: 0.5; }
+  input[type="number"]:disabled, input[type="time"]:disabled, select:disabled { opacity: 0.5; }
 
   .switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
   .switch input { opacity: 0; width: 0; height: 0; }
@@ -157,7 +204,16 @@
   .switch input:checked + .switch-slider { background: var(--color-primary); }
   .switch input:checked + .switch-slider::before { transform: translateX(20px); }
 
-  .settings-card .actions { margin-top: 20px; margin-bottom: 0; }
+  .day-toggles { display: flex; gap: 6px; margin-top: 4px; }
+  .day-btn {
+    flex: 1; padding: 10px 0; border-radius: 10px; border: 1px solid var(--color-border);
+    background: var(--color-bg); color: var(--color-text-muted); font-weight: 700; font-size: 13px;
+    cursor: pointer;
+  }
+  .day-btn.active { background: var(--color-primary); border-color: var(--color-primary); color: #fff; }
+  .day-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .settings-card .actions { margin-top: 4px; margin-bottom: 0; }
 
   .history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
   .history-list li {
@@ -211,62 +267,134 @@
   </section>
 
   <section id="dashboard-screen" class="screen hidden">
-    <div class="grid">
-      <div class="card">
-        <span class="label">Temperature</span>
-        <span class="value" id="val-temp">--</span>
-      </div>
-      <div class="card">
-        <span class="label">Humidity</span>
-        <span class="value" id="val-hum">--</span>
-      </div>
-      <div class="card">
-        <span class="label">Soil Moisture</span>
-        <span class="value" id="val-soil">--</span>
-      </div>
-      <div class="card">
-        <span class="label">Pump</span>
-        <span class="value" id="val-pump">--</span>
-      </div>
-      <div class="card wide">
-        <span class="label">Last Watered</span>
-        <span class="value" id="val-last-watered">No history yet</span>
-      </div>
-    </div>
+    <nav class="tabbar" role="tablist">
+      <button type="button" class="tab-btn active" data-tab="dashboard" role="tab" aria-selected="true">Dashboard</button>
+      <button type="button" class="tab-btn" data-tab="history" role="tab" aria-selected="false">History</button>
+      <button type="button" class="tab-btn" data-tab="settings" role="tab" aria-selected="false">Settings</button>
+    </nav>
 
-    <div class="actions">
-      <button type="button" id="refresh-btn" class="primary-btn">Refresh Now</button>
-      <button type="button" id="water-btn" class="accent-btn">Water Now</button>
-    </div>
+    <section id="tab-dashboard" class="tab-panel">
+      <p class="update-ticker" id="update-ticker" aria-live="polite">Waiting for first reading…</p>
 
-    <section class="settings-card">
-      <h2>Settings</h2>
-      <div class="row">
-        <label class="field-label" for="mode-toggle" style="margin:0;">Custom mode</label>
-        <label class="switch">
-          <input type="checkbox" id="mode-toggle" />
-          <span class="switch-slider"></span>
-        </label>
+      <div class="grid">
+        <div class="card" id="card-temp">
+          <span class="label">Temperature</span>
+          <span class="value" id="val-temp">--</span>
+          <svg class="sparkline" id="spark-temp" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"></svg>
+        </div>
+        <div class="card" id="card-hum">
+          <span class="label">Humidity</span>
+          <span class="value" id="val-hum">--</span>
+          <svg class="sparkline" id="spark-hum" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"></svg>
+        </div>
+        <div class="card" id="card-soil">
+          <span class="label">Soil Moisture</span>
+          <span class="value" id="val-soil">--</span>
+          <svg class="sparkline" id="spark-soil" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"></svg>
+        </div>
+        <div class="card" id="card-pump">
+          <span class="label">Pump</span>
+          <span class="value" id="val-pump">--</span>
+          <div class="pump-progress hidden" id="pump-progress"><div class="pump-progress-bar"></div></div>
+        </div>
+        <div class="card wide">
+          <span class="label">Last Watered</span>
+          <span class="value" id="val-last-watered">No history yet</span>
+        </div>
       </div>
 
-      <label class="field-label" for="temp-threshold">Water when temperature is at least (°C)</label>
-      <input type="number" id="temp-threshold" step="0.1" value="28" />
+      <div class="actions">
+        <button type="button" id="refresh-btn" class="primary-btn">Refresh Now</button>
+        <button type="button" id="water-btn" class="accent-btn">Water Now</button>
+      </div>
+    </section>
 
-      <label class="field-label" for="soil-threshold">Water when soil moisture is below (%)</label>
-      <input type="number" id="soil-threshold" step="1" min="0" max="100" value="40" />
+    <section id="tab-history" class="tab-panel hidden">
+      <section class="history-card">
+        <h2>Watering History</h2>
+        <ul id="history-list" class="history-list">
+          <li class="empty">No watering events yet.</li>
+        </ul>
+      </section>
+    </section>
+
+    <section id="tab-settings" class="tab-panel hidden">
+      <section class="settings-card">
+        <h2>Watering Thresholds</h2>
+        <div class="row">
+          <label class="field-label" for="mode-toggle" style="margin:0;">Custom mode</label>
+          <label class="switch">
+            <input type="checkbox" id="mode-toggle" />
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+
+        <label class="field-label" for="temp-threshold">Water when temperature is at least (°C)</label>
+        <input type="number" id="temp-threshold" step="0.1" value="28" />
+
+        <label class="field-label" for="soil-threshold">Water when soil moisture is below (%)</label>
+        <input type="number" id="soil-threshold" step="1" min="0" max="100" value="40" />
+      </section>
+
+      <section class="settings-card">
+        <h2>Pump</h2>
+        <div class="row">
+          <label class="field-label" for="pump-mode-toggle" style="margin:0;">Water until soil is wet</label>
+          <label class="switch">
+            <input type="checkbox" id="pump-mode-toggle" />
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+
+        <label class="field-label" for="soil-wet-target">Stop watering once soil reaches (%)</label>
+        <input type="number" id="soil-wet-target" step="1" min="0" max="100" value="65" disabled />
+        <p class="hint-small">Either way, the pump always stops after ~20s as a safety cap, even if the target's never reached.</p>
+      </section>
+
+      <section class="settings-card">
+        <h2>Watering Schedule</h2>
+        <div class="row">
+          <label class="field-label" for="sched-enabled-toggle" style="margin:0;">Enabled</label>
+          <label class="switch">
+            <input type="checkbox" id="sched-enabled-toggle" checked />
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+
+        <label class="field-label" for="sched-mode-select">Repeat</label>
+        <select id="sched-mode-select">
+          <option value="daily">Once a day, at a set time</option>
+          <option value="interval">Repeat every few hours</option>
+        </select>
+
+        <div id="sched-daily-fields">
+          <label class="field-label" for="sched-time">Time</label>
+          <input type="time" id="sched-time" value="05:00" />
+        </div>
+
+        <div id="sched-interval-fields" class="hidden">
+          <label class="field-label" for="sched-interval-hours">Every how many hours</label>
+          <input type="number" id="sched-interval-hours" step="1" min="1" max="24" value="1" />
+        </div>
+
+        <label class="field-label">Active days</label>
+        <div class="day-toggles" id="day-toggles">
+          <button type="button" class="day-btn active" data-day="0" aria-label="Sunday" title="Sunday">S</button>
+          <button type="button" class="day-btn active" data-day="1" aria-label="Monday" title="Monday">M</button>
+          <button type="button" class="day-btn active" data-day="2" aria-label="Tuesday" title="Tuesday">T</button>
+          <button type="button" class="day-btn active" data-day="3" aria-label="Wednesday" title="Wednesday">W</button>
+          <button type="button" class="day-btn active" data-day="4" aria-label="Thursday" title="Thursday">T</button>
+          <button type="button" class="day-btn active" data-day="5" aria-label="Friday" title="Friday">F</button>
+          <button type="button" class="day-btn active" data-day="6" aria-label="Saturday" title="Saturday">S</button>
+        </div>
+        <p class="hint-small">The ESP32 has no clock of its own — this page keeps it in sync with your phone's clock whenever it's connected.</p>
+      </section>
 
       <div class="actions">
         <button type="button" id="save-settings-btn" class="primary-btn">Save</button>
         <button type="button" id="reset-settings-btn" class="danger-btn">Reset to Default</button>
       </div>
       <p id="settings-status" class="status-text" aria-live="polite"></p>
-    </section>
-
-    <section class="history-card">
-      <h2>Watering History</h2>
-      <ul id="history-list" class="history-list">
-        <li class="empty">No watering events yet.</li>
-      </ul>
     </section>
   </section>
 </div>
@@ -282,9 +410,12 @@
   var EVENT_CHAR_UUID = '12345678-1234-5678-1234-56789abc0002';
   var CONFIG_CHAR_UUID = '12345678-1234-5678-1234-56789abc0003';
   var COMMAND_CHAR_UUID = '12345678-1234-5678-1234-56789abc0004';
+  var TIME_CHAR_UUID = '12345678-1234-5678-1234-56789abc0005';
   var DEVICE_NAME = 'PlantWaterer';
   var REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-  var HISTORY_LIMIT = 10;
+  var HISTORY_LIMIT = 50;
+  var SPARK_MAX_POINTS = 20;
+  var PUMP_SAFETY_NET_MS = 22000; // matches firmware's ~20s cap + a small buffer
 
   // ---------- IndexedDB ----------
   var DB_NAME = 'plant-waterer';
@@ -379,6 +510,22 @@
     connInfo: document.getElementById('conn-info'),
     deviceLabel: document.getElementById('device-label'),
     disconnectBtn: document.getElementById('disconnect-btn'),
+
+    tabButtons: Array.prototype.slice.call(document.querySelectorAll('.tab-btn')),
+    tabDashboard: document.getElementById('tab-dashboard'),
+    tabHistory: document.getElementById('tab-history'),
+    tabSettings: document.getElementById('tab-settings'),
+
+    updateTicker: document.getElementById('update-ticker'),
+    cardTemp: document.getElementById('card-temp'),
+    cardHum: document.getElementById('card-hum'),
+    cardSoil: document.getElementById('card-soil'),
+    cardPump: document.getElementById('card-pump'),
+    sparkTemp: document.getElementById('spark-temp'),
+    sparkHum: document.getElementById('spark-hum'),
+    sparkSoil: document.getElementById('spark-soil'),
+    pumpProgress: document.getElementById('pump-progress'),
+
     refreshBtn: document.getElementById('refresh-btn'),
     waterBtn: document.getElementById('water-btn'),
     valTemp: document.getElementById('val-temp'),
@@ -386,9 +533,22 @@
     valSoil: document.getElementById('val-soil'),
     valPump: document.getElementById('val-pump'),
     valLastWatered: document.getElementById('val-last-watered'),
+
     modeToggle: document.getElementById('mode-toggle'),
     tempThreshold: document.getElementById('temp-threshold'),
     soilThreshold: document.getElementById('soil-threshold'),
+
+    pumpModeToggle: document.getElementById('pump-mode-toggle'),
+    soilWetTarget: document.getElementById('soil-wet-target'),
+
+    schedEnabledToggle: document.getElementById('sched-enabled-toggle'),
+    schedModeSelect: document.getElementById('sched-mode-select'),
+    schedDailyFields: document.getElementById('sched-daily-fields'),
+    schedIntervalFields: document.getElementById('sched-interval-fields'),
+    schedTime: document.getElementById('sched-time'),
+    schedIntervalHours: document.getElementById('sched-interval-hours'),
+    dayToggles: document.getElementById('day-toggles'),
+
     saveSettingsBtn: document.getElementById('save-settings-btn'),
     resetSettingsBtn: document.getElementById('reset-settings-btn'),
     settingsStatus: document.getElementById('settings-status'),
@@ -403,9 +563,13 @@
     eventChar: null,
     configChar: null,
     commandChar: null,
+    timeChar: null,
   };
   var lastReading = null;
+  var lastReadingAt = null;
   var refreshTimer = null;
+  var tickTimer = null;
+  var scheduleDays = [true, true, true, true, true, true, true]; // index 0 = Sunday
 
   function isWebBluetoothSupported() {
     return 'bluetooth' in navigator;
@@ -413,6 +577,25 @@
 
   function decodeText(dataView) {
     return new TextDecoder('utf-8').decode(dataView);
+  }
+
+  function pad2(n) {
+    return (n < 10 ? '0' : '') + n;
+  }
+
+  // ---------- Phone-pushed clock ----------
+  // The ESP32 has no RTC, so it can't know the time on its own. We send it the
+  // current time shifted by the browser's timezone offset, so the firmware can
+  // do plain UTC-style day/hour/minute math and land on the right LOCAL time.
+  function localEpochSeconds() {
+    var now = new Date();
+    return Math.floor(now.getTime() / 1000) - now.getTimezoneOffset() * 60;
+  }
+
+  function syncTime() {
+    if (!ble.timeChar) return Promise.resolve();
+    return ble.timeChar.writeValue(new TextEncoder().encode(String(localEpochSeconds())))
+      .catch(function (err) { console.warn('Time sync failed', err); });
   }
 
   async function connect() {
@@ -430,12 +613,14 @@
     var eventChar = await service.getCharacteristic(EVENT_CHAR_UUID);
     var configChar = await service.getCharacteristic(CONFIG_CHAR_UUID);
     var commandChar = await service.getCharacteristic(COMMAND_CHAR_UUID);
+    var timeChar = await service.getCharacteristic(TIME_CHAR_UUID);
 
     ble.device = device;
     ble.sensorChar = sensorChar;
     ble.eventChar = eventChar;
     ble.configChar = configChar;
     ble.commandChar = commandChar;
+    ble.timeChar = timeChar;
 
     sensorChar.addEventListener('characteristicvaluechanged', handleSensorNotification);
     await sensorChar.startNotifications();
@@ -455,6 +640,7 @@
       console.warn('Could not read initial config', err);
     }
 
+    await syncTime();
     onConnected(device.name || DEVICE_NAME);
 
     // Kick an immediate sensor reading instead of waiting up to ~10s for the
@@ -472,14 +658,19 @@
       return;
     }
     lastReading = data;
+    lastReadingAt = Date.now();
     renderReading(data);
-    insertReading(data).catch(function (err) { console.warn('Failed to store reading', err); });
+    flashCards([el.cardTemp, el.cardHum, el.cardSoil, el.cardPump]);
+    insertReading(data)
+      .then(refreshSparklines)
+      .catch(function (err) { console.warn('Failed to store reading', err); });
   }
 
   async function handleEventNotification(event) {
     var text = decodeText(event.target.value);
     if (text !== 'WATERED') return;
 
+    hidePumpProgress();
     if (lastReading) {
       await insertWateringEvent(lastReading).catch(function (err) {
         console.warn('Failed to store watering event', err);
@@ -505,12 +696,16 @@
 
   function onDisconnected() {
     stopAutoRefresh();
+    stopTicker();
     ble.device = null;
     ble.sensorChar = null;
     ble.eventChar = null;
     ble.configChar = null;
     ble.commandChar = null;
+    ble.timeChar = null;
     lastReading = null;
+    lastReadingAt = null;
+    hidePumpProgress();
     showConnectScreen();
   }
 
@@ -536,6 +731,7 @@
     stopAutoRefresh();
     refreshTimer = setInterval(function () {
       writeCommand('REFRESH').catch(function (err) { console.warn('Auto-refresh failed', err); });
+      syncTime();
     }, REFRESH_INTERVAL_MS);
   }
 
@@ -546,7 +742,34 @@
     }
   }
 
-  // ---------- UI ----------
+  function startTicker() {
+    stopTicker();
+    tickTimer = setInterval(updateTicker, 1000);
+    updateTicker();
+  }
+
+  function stopTicker() {
+    if (tickTimer) {
+      clearInterval(tickTimer);
+      tickTimer = null;
+    }
+  }
+
+  function updateTicker() {
+    if (!lastReadingAt) {
+      el.updateTicker.textContent = 'Waiting for first reading…';
+      return;
+    }
+    var s = Math.floor((Date.now() - lastReadingAt) / 1000);
+    var text;
+    if (s < 5) text = 'Updated just now';
+    else if (s < 60) text = 'Updated ' + s + 's ago';
+    else if (s < 3600) text = 'Updated ' + Math.floor(s / 60) + 'm ago';
+    else text = 'Updated ' + Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm ago';
+    el.updateTicker.textContent = text;
+  }
+
+  // ---------- UI: screens & tabs ----------
   function showConnectScreen() {
     el.dashboardScreen.classList.add('hidden');
     el.connInfo.classList.add('hidden');
@@ -562,7 +785,35 @@
     el.dashboardScreen.classList.remove('hidden');
     el.connInfo.classList.remove('hidden');
     startAutoRefresh();
+    startTicker();
     refreshHistory();
+    refreshSparklines();
+  }
+
+  function switchTab(name) {
+    var panels = { dashboard: el.tabDashboard, history: el.tabHistory, settings: el.tabSettings };
+    Object.keys(panels).forEach(function (key) {
+      panels[key].classList.toggle('hidden', key !== name);
+    });
+    el.tabButtons.forEach(function (btn) {
+      var active = btn.dataset.tab === name;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+  }
+
+  el.tabButtons.forEach(function (btn) {
+    btn.addEventListener('click', function () { switchTab(btn.dataset.tab); });
+  });
+
+  // ---------- UI: dashboard ----------
+  function flashCards(cards) {
+    cards.forEach(function (card) {
+      card.classList.remove('flash');
+      // Force reflow so the animation restarts even if it's still running.
+      void card.offsetWidth;
+      card.classList.add('flash');
+    });
   }
 
   function renderReading(data) {
@@ -573,11 +824,84 @@
     el.valPump.classList.toggle('pump-on', !!data.pump);
   }
 
+  var pumpProgressTimer = null;
+  function showPumpProgress() {
+    el.pumpProgress.classList.remove('hidden');
+    clearTimeout(pumpProgressTimer);
+    pumpProgressTimer = setTimeout(hidePumpProgress, PUMP_SAFETY_NET_MS);
+  }
+  function hidePumpProgress() {
+    el.pumpProgress.classList.add('hidden');
+    // Keep Water Now disabled for the whole cycle, not just the write() —
+    // otherwise a second tap mid-cycle queues a back-to-back watering, since
+    // a manual trigger intentionally bypasses the cooldown.
+    el.waterBtn.disabled = false;
+    clearTimeout(pumpProgressTimer);
+    pumpProgressTimer = null;
+  }
+
+  function renderSparkline(svgEl, values) {
+    while (svgEl.firstChild) svgEl.removeChild(svgEl.firstChild);
+    var nums = values.filter(function (v) { return typeof v === 'number'; });
+    if (nums.length < 2) return;
+
+    var w = 100, h = 28, pad = 3;
+    var min = Math.min.apply(null, nums);
+    var max = Math.max.apply(null, nums);
+    var range = (max - min) || 1;
+
+    var coords = nums.map(function (v, i) {
+      var x = pad + (i / (nums.length - 1)) * (w - pad * 2);
+      var y = pad + (h - pad * 2) - ((v - min) / range) * (h - pad * 2);
+      return [x, y];
+    });
+
+    var ns = 'http://www.w3.org/2000/svg';
+    var line = document.createElementNS(ns, 'polyline');
+    line.setAttribute('points', coords.map(function (p) { return p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' '));
+    line.setAttribute('class', 'spark-line');
+    svgEl.appendChild(line);
+
+    var last = coords[coords.length - 1];
+    var dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('cx', last[0].toFixed(1));
+    dot.setAttribute('cy', last[1].toFixed(1));
+    dot.setAttribute('r', '3.2');
+    dot.setAttribute('class', 'spark-dot');
+    svgEl.appendChild(dot);
+  }
+
+  async function refreshSparklines() {
+    var recent = await getRecent('readings', SPARK_MAX_POINTS);
+    recent.reverse(); // oldest -> newest, left -> right
+    renderSparkline(el.sparkTemp, recent.map(function (r) { return r.temp; }));
+    renderSparkline(el.sparkHum, recent.map(function (r) { return r.hum; }));
+    renderSparkline(el.sparkSoil, recent.map(function (r) { return r.soil; }));
+  }
+
+  // ---------- UI: settings ----------
   function renderConfig(config) {
     el.modeToggle.checked = config.mode === 'custom';
     if (typeof config.tempThreshold === 'number') el.tempThreshold.value = config.tempThreshold;
     if (typeof config.soilThreshold === 'number') el.soilThreshold.value = config.soilThreshold;
     updateThresholdEditability();
+
+    el.pumpModeToggle.checked = config.pumpMode === 'moisture';
+    if (typeof config.soilWetTarget === 'number') el.soilWetTarget.value = config.soilWetTarget;
+    updatePumpModeEditability();
+
+    var sched = config.schedule || {};
+    el.schedEnabledToggle.checked = !!sched.enabled;
+    el.schedModeSelect.value = sched.mode === 'interval' ? 'interval' : 'daily';
+    if (typeof sched.hour === 'number' && typeof sched.minute === 'number') {
+      el.schedTime.value = pad2(sched.hour) + ':' + pad2(sched.minute);
+    }
+    if (typeof sched.intervalHours === 'number') el.schedIntervalHours.value = sched.intervalHours;
+    if (Array.isArray(sched.days) && sched.days.length === 7) {
+      scheduleDays = sched.days.map(function (d) { return !!d; });
+    }
+    renderDayToggles();
+    updateScheduleEditability();
   }
 
   function updateThresholdEditability() {
@@ -585,6 +909,43 @@
     el.tempThreshold.disabled = !custom;
     el.soilThreshold.disabled = !custom;
   }
+
+  function updatePumpModeEditability() {
+    el.soilWetTarget.disabled = !el.pumpModeToggle.checked;
+  }
+
+  function updateScheduleModeFields() {
+    var interval = el.schedModeSelect.value === 'interval';
+    el.schedDailyFields.classList.toggle('hidden', interval);
+    el.schedIntervalFields.classList.toggle('hidden', !interval);
+  }
+
+  function updateScheduleEditability() {
+    var on = el.schedEnabledToggle.checked;
+    el.schedModeSelect.disabled = !on;
+    el.schedTime.disabled = !on;
+    el.schedIntervalHours.disabled = !on;
+    Array.prototype.forEach.call(el.dayToggles.querySelectorAll('.day-btn'), function (btn) {
+      btn.disabled = !on;
+    });
+    updateScheduleModeFields();
+  }
+
+  function renderDayToggles() {
+    Array.prototype.forEach.call(el.dayToggles.querySelectorAll('.day-btn'), function (btn) {
+      var i = parseInt(btn.dataset.day, 10);
+      btn.classList.toggle('active', !!scheduleDays[i]);
+      btn.setAttribute('aria-pressed', scheduleDays[i] ? 'true' : 'false');
+    });
+  }
+
+  Array.prototype.forEach.call(el.dayToggles.querySelectorAll('.day-btn'), function (btn) {
+    btn.addEventListener('click', function () {
+      var i = parseInt(btn.dataset.day, 10);
+      scheduleDays[i] = !scheduleDays[i];
+      renderDayToggles();
+    });
+  });
 
   var settingsStatusTimer = null;
   function setSettingsStatus(msg) {
@@ -597,6 +958,7 @@
     }
   }
 
+  // ---------- UI: history ----------
   function formatTimestamp(ts) {
     return new Date(ts).toLocaleString();
   }
@@ -633,6 +995,7 @@
     });
   }
 
+  // ---------- Toast ----------
   var toastTimer = null;
   function showToast(message) {
     el.toast.textContent = message;
@@ -678,29 +1041,48 @@
 
   el.waterBtn.addEventListener('click', async function () {
     el.waterBtn.disabled = true;
+    showPumpProgress();
     try {
       await writeCommand('WATER_NOW');
     } catch (err) {
       console.warn('Water now failed', err);
-    } finally {
-      el.waterBtn.disabled = false;
+      hidePumpProgress(); // the command never even reached the device; re-enables the button
     }
   });
 
   el.modeToggle.addEventListener('change', updateThresholdEditability);
+  el.pumpModeToggle.addEventListener('change', updatePumpModeEditability);
+  el.schedEnabledToggle.addEventListener('change', updateScheduleEditability);
+  el.schedModeSelect.addEventListener('change', updateScheduleModeFields);
 
   el.saveSettingsBtn.addEventListener('click', async function () {
     var tempThreshold = parseFloat(el.tempThreshold.value);
     var soilThreshold = parseInt(el.soilThreshold.value, 10);
-    if (Number.isNaN(tempThreshold) || Number.isNaN(soilThreshold)) {
+    var soilWetTarget = parseInt(el.soilWetTarget.value, 10);
+    var intervalHours = parseInt(el.schedIntervalHours.value, 10);
+
+    if ([tempThreshold, soilThreshold, soilWetTarget, intervalHours].some(function (n) { return Number.isNaN(n); })) {
       setSettingsStatus('Enter valid numbers before saving.');
       return;
     }
+
+    var timeParts = (el.schedTime.value || '05:00').split(':');
     var config = {
       mode: el.modeToggle.checked ? 'custom' : 'default',
       tempThreshold: tempThreshold,
       soilThreshold: soilThreshold,
+      pumpMode: el.pumpModeToggle.checked ? 'moisture' : 'duration',
+      soilWetTarget: soilWetTarget,
+      schedule: {
+        enabled: el.schedEnabledToggle.checked,
+        mode: el.schedModeSelect.value,
+        hour: parseInt(timeParts[0], 10),
+        minute: parseInt(timeParts[1], 10),
+        intervalHours: intervalHours,
+        days: scheduleDays.slice(),
+      },
     };
+
     try {
       await writeConfig(config);
       setSettingsStatus('Saved to device.');
@@ -727,6 +1109,9 @@
     el.connectBtn.textContent = 'Web Bluetooth not available';
   }
   updateThresholdEditability();
+  updatePumpModeEditability();
+  updateScheduleEditability();
+  renderDayToggles();
   showConnectScreen();
 })();
 </script>

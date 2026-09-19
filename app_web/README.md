@@ -32,6 +32,9 @@ Android, so serve the folder instead. Easiest options:
 
 ## How it works
 
+- The page is three tabs once connected: **Dashboard** (live readings, trend
+  sparklines, Refresh/Water Now), **History** (last 50 watering events), and
+  **Settings** (thresholds, pump mode, schedule).
 - The Connect screen calls `navigator.bluetooth.requestDevice`, filtered to
   the `PlantWaterer` service UUID, and connects to its GATT server.
 - Once connected, the dashboard subscribes to notifications on SENSOR (live
@@ -42,8 +45,24 @@ Android, so serve the folder instead. Easiest options:
   to the COMMAND/CONFIG characteristics — see the UUID table below.
 - Every sensor reading and every watering event is timestamped with
   `Date.now()` (the ESP32 has no real-time clock) and stored in IndexedDB
-  (`readings` and `watering_events` object stores), so "Last Watered" and
-  the history list persist across page reloads.
+  (`readings` and `watering_events` object stores), so "Last Watered", the
+  trend sparklines, and the history list all persist across page reloads.
+- **Clock sync:** the ESP32 has no RTC, so this page pushes the current time
+  to the TIME characteristic (as epoch seconds, pre-shifted for your
+  timezone) right after connecting and again on every 5-minute auto-refresh.
+  The device uses that to run the watering schedule. If the page hasn't
+  connected in a while, the schedule runs off whatever time it last heard —
+  reconnect periodically to keep it accurate.
+- **Pump mode:** "Fixed duration" runs the pump for a flat 3 seconds, same as
+  before. "Until soil is wet" pulses the pump and re-checks moisture between
+  bursts until it reaches your target — either way the firmware enforces a
+  hard ~20s cap regardless of the setting, so a misreading sensor or an empty
+  reservoir can't run the pump indefinitely.
+- **Schedule:** runs alongside the existing temperature+soil auto-watering
+  (either can trigger a watering; the same 10-minute cooldown applies to
+  both, so they won't double-water). Default is once a day at 5:00 AM, every
+  day — configurable to a different time, an every-N-hours interval, and
+  specific days on/off.
 - If the BLE connection drops for any reason (`gattserverdisconnected`),
   the UI falls back to the Connect screen automatically.
 
@@ -56,5 +75,6 @@ change one side, change the other.
 |---|---|---|---|
 | SENSOR | `...abc0001` | read, notify | `{"temp","hum","soil","pump"}` |
 | EVENT | `...abc0002` | notify | `"WATERED"` |
-| CONFIG | `...abc0003` | read, write, notify | `{"mode","tempThreshold","soilThreshold"}` |
+| CONFIG | `...abc0003` | read, write, notify | `{"mode","tempThreshold","soilThreshold","pumpMode","soilWetTarget","schedule":{"enabled","mode","hour","minute","intervalHours","days"}}` |
 | COMMAND | `...abc0004` | write | `"WATER_NOW"` \| `"REFRESH"` \| `"RESET_DEFAULTS"` |
+| TIME | `...abc0005` | write | epoch seconds as a decimal string, e.g. `"1758271234"` |
