@@ -351,7 +351,10 @@
 
         <label class="field-label" for="pump-duration">Pump run time (seconds)</label>
         <input type="number" id="pump-duration" step="1" min="1" value="20" />
-        <p class="hint-small">Either way, the pump always stops after ~20s as a safety cap, even if the target's never reached.</p>
+
+        <label class="field-label" for="soil-max-percent">Safety stop: cut pump if soil reaches (%)</label>
+        <input type="number" id="soil-max-percent" step="1" min="0" max="100" value="80" />
+        <p class="hint-small">Applies to every watering, manual or automatic, in either mode above — the pump stops immediately once soil hits this %, even mid-run. "Water until soil is wet" also always stops after ~20s as a safety cap, even if its own target is never reached.</p>
       </section>
 
       <section class="settings-card">
@@ -414,6 +417,7 @@
   var CONFIG_CHAR_UUID = '12345678-1234-5678-1234-56789abc0003';
   var COMMAND_CHAR_UUID = '12345678-1234-5678-1234-56789abc0004';
   var TIME_CHAR_UUID = '12345678-1234-5678-1234-56789abc0005';
+  var HISTORY_CHAR_UUID = '12345678-1234-5678-1234-56789abc0006';
   var DEVICE_NAME = 'PlantWaterer';
   var REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   var HISTORY_LIMIT = 50;
@@ -503,6 +507,49 @@
     return getRecent('watering_events', limit || HISTORY_LIMIT);
   }
 
+  // The ESP32 keeps its own small ring buffer of recent watering events (see
+  // HISTORY_CHAR in the firmware) so auto-watering that happens with nothing
+  // connected still shows up here once we reconnect. Merge in anything we
+  // don't already have, deduping by timestamp since the device may still be
+  // holding events we already stored live via the EVENT characteristic.
+  async function syncHistoryFromDevice() {
+    if (!ble.historyChar) return;
+    var text = decodeText(await ble.historyChar.readValue());
+    var events;
+    try {
+      events = JSON.parse(text);
+    } catch (err) {
+      console.warn('Malformed history payload', text);
+      return;
+    }
+    if (!Array.isArray(events) || events.length === 0) return;
+
+    var existing = await getWateringHistory(HISTORY_LIMIT);
+    var existingTimes = existing.map(function (r) { return r.timestamp; });
+    function alreadyStored(ms) {
+      return existingTimes.some(function (t) { return Math.abs(t - ms) < 2000; });
+    }
+
+    var insertedAny = false;
+    for (var i = 0; i < events.length; i++) {
+      var ev = events[i];
+      // t === 0 means the device hadn't been time-synced yet when it watered —
+      // no reliable timestamp to store it under, so skip it.
+      if (!ev || typeof ev.t !== 'number' || ev.t <= 0) continue;
+      var ms = ev.t * 1000;
+      if (alreadyStored(ms)) continue;
+      await addRecord('watering_events', {
+        temp: typeof ev.temp === 'number' ? ev.temp : null,
+        hum: typeof ev.hum === 'number' ? ev.hum : null,
+        soil: typeof ev.soil === 'number' ? ev.soil : null,
+        timestamp: ms,
+      });
+      existingTimes.push(ms);
+      insertedAny = true;
+    }
+    if (insertedAny) await refreshHistory();
+  }
+
   // ---------- DOM ----------
   var el = {
     browserWarning: document.getElementById('browser-warning'),
@@ -544,6 +591,7 @@
     pumpModeToggle: document.getElementById('pump-mode-toggle'),
     soilWetTarget: document.getElementById('soil-wet-target'),
     pumpDuration: document.getElementById('pump-duration'),
+    soilMaxPercent: document.getElementById('soil-max-percent'),
 
     schedEnabledToggle: document.getElementById('sched-enabled-toggle'),
     schedModeSelect: document.getElementById('sched-mode-select'),
@@ -568,6 +616,7 @@
     configChar: null,
     commandChar: null,
     timeChar: null,
+    historyChar: null,
   };
   var lastReading = null;
   var lastReadingAt = null;
@@ -618,6 +667,7 @@
     var configChar = await service.getCharacteristic(CONFIG_CHAR_UUID);
     var commandChar = await service.getCharacteristic(COMMAND_CHAR_UUID);
     var timeChar = await service.getCharacteristic(TIME_CHAR_UUID);
+    var historyChar = await service.getCharacteristic(HISTORY_CHAR_UUID);
 
     ble.device = device;
     ble.sensorChar = sensorChar;
@@ -625,6 +675,7 @@
     ble.configChar = configChar;
     ble.commandChar = commandChar;
     ble.timeChar = timeChar;
+    ble.historyChar = historyChar;
 
     sensorChar.addEventListener('characteristicvaluechanged', handleSensorNotification);
     await sensorChar.startNotifications();
@@ -642,6 +693,14 @@
       applyConfigValue(await configChar.readValue());
     } catch (err) {
       console.warn('Could not read initial config', err);
+    }
+
+    // Pull down any watering events the device logged while nothing was
+    // connected (auto-watering runs entirely on its own) so History stays complete.
+    try {
+      await syncHistoryFromDevice();
+    } catch (err) {
+      console.warn('Could not sync watering history', err);
     }
 
     await syncTime();
@@ -707,6 +766,7 @@
     ble.configChar = null;
     ble.commandChar = null;
     ble.timeChar = null;
+    ble.historyChar = null;
     lastReading = null;
     lastReadingAt = null;
     hidePumpProgress();
@@ -893,6 +953,7 @@
     el.pumpModeToggle.checked = config.pumpMode === 'moisture';
     if (typeof config.soilWetTarget === 'number') el.soilWetTarget.value = config.soilWetTarget;
     if (typeof config.pumpDurationMs === 'number') el.pumpDuration.value = Math.round(config.pumpDurationMs / 1000);
+    if (typeof config.soilMaxPercent === 'number') el.soilMaxPercent.value = config.soilMaxPercent;
     updatePumpModeEditability();
 
     var sched = config.schedule || {};
@@ -1065,9 +1126,10 @@
     var soilThreshold = parseInt(el.soilThreshold.value, 10);
     var soilWetTarget = parseInt(el.soilWetTarget.value, 10);
     var pumpDurationSec = parseInt(el.pumpDuration.value, 10);
+    var soilMaxPercent = parseInt(el.soilMaxPercent.value, 10);
     var intervalHours = parseInt(el.schedIntervalHours.value, 10);
 
-    if ([tempThreshold, soilThreshold, soilWetTarget, pumpDurationSec, intervalHours].some(function (n) { return Number.isNaN(n); })) {
+    if ([tempThreshold, soilThreshold, soilWetTarget, pumpDurationSec, soilMaxPercent, intervalHours].some(function (n) { return Number.isNaN(n); })) {
       setSettingsStatus('Enter valid numbers before saving.');
       return;
     }
@@ -1080,6 +1142,7 @@
       pumpMode: el.pumpModeToggle.checked ? 'moisture' : 'duration',
       soilWetTarget: soilWetTarget,
       pumpDurationMs: pumpDurationSec * 1000,
+      soilMaxPercent: soilMaxPercent,
       schedule: {
         enabled: el.schedEnabledToggle.checked,
         mode: el.schedModeSelect.value,
