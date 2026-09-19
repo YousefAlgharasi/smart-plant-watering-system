@@ -50,8 +50,13 @@ const unsigned long PUMP_SETTLE_MS        = 800;     // moisture mode: pause aft
 const unsigned long MIN_WATER_INTERVAL_MS = 600000;  // 10 min cooldown between AUTO waterings (schedule counts as auto)
 
 // ---------- Defaults ----------
-const float DEFAULT_TEMP_THRESHOLD  = 28.0; // water only if temp >= this (it's warm enough)
-const int   DEFAULT_SOIL_THRESHOLD  = 40;   // water only if moisture % is below this (it's dry)
+// Auto-watering fires only when ALL THREE are true: temp in [MIN,MAX], humidity
+// in [MIN,MAX], and soil % below the threshold (it's dry).
+const float DEFAULT_TEMP_MIN        = 18.0;
+const float DEFAULT_TEMP_MAX        = 30.0;
+const float DEFAULT_HUM_MIN         = 30.0;
+const float DEFAULT_HUM_MAX         = 70.0;
+const int   DEFAULT_SOIL_THRESHOLD  = 20;   // water only if moisture % is below this (it's dry)
 const int   DEFAULT_SOIL_WET_TARGET = 65;   // moisture-mode pump target: stop once soil reaches this %
 const unsigned long DEFAULT_PUMP_DURATION_MS = 20000; // fixed-duration pump mode run length
 const int   DEFAULT_SOIL_MAX_PERCENT = 80;  // universal safety cap: stop ANY watering immediately at this %
@@ -80,8 +85,10 @@ WateringLogEntry history[HISTORY_CAPACITY];
 uint8_t historyCount = 0;
 uint8_t historyHead = 0; // index the NEXT entry will be written to
 
-String mode = "default";     // "default" or "custom" (temp/soil thresholds)
-float tempThreshold = DEFAULT_TEMP_THRESHOLD;
+float tempMin = DEFAULT_TEMP_MIN;
+float tempMax = DEFAULT_TEMP_MAX;
+float humMin = DEFAULT_HUM_MIN;
+float humMax = DEFAULT_HUM_MAX;
 int soilThreshold = DEFAULT_SOIL_THRESHOLD;
 
 String pumpMode = "duration"; // "duration" (fixed burst) or "moisture" (until soil is wet)
@@ -115,20 +122,36 @@ float lastTemp = NAN;
 float lastHum = NAN;
 bool pumpOn = false;
 
+// ---------- Pump state machine (non-blocking) ----------
+// Watering used to be one long blocking call. That meant nothing else — not
+// sensor publishes, not an emergency stop command — could happen while the
+// pump ran for up to ~20s. This drives the same on/off pulsing pattern from
+// loop() one step at a time instead, so the rest of the device stays live.
+bool pumpActive = false;
+bool pumpRelayOn = false;
+bool pumpRequestStop = false;
+unsigned long pumpStartMillis = 0;
+unsigned long pumpPhaseStartMillis = 0;
+unsigned long pumpMaxRunMs = 0;
+
 // BLE write callbacks run on NimBLE's own task; keep them fast and defer real
-// work (especially watering, which can now block for several seconds) to loop().
+// work to loop().
 volatile bool pendingWaterNow = false;
+volatile bool pendingStopNow = false;
 volatile bool pendingReset = false;
 volatile bool pendingRefresh = false;
 
 void publishSensorData();
-void waterPlant(bool manual);
+void publishPumpStatus();
+void startWatering(bool manual);
 
 // ---------- Config persistence ----------
 void loadConfig() {
   prefs.begin("watering", true);
-  mode = prefs.getString("mode", "default");
-  tempThreshold = prefs.getFloat("tempTh", DEFAULT_TEMP_THRESHOLD);
+  tempMin = prefs.getFloat("tempMin", DEFAULT_TEMP_MIN);
+  tempMax = prefs.getFloat("tempMax", DEFAULT_TEMP_MAX);
+  humMin = prefs.getFloat("humMin", DEFAULT_HUM_MIN);
+  humMax = prefs.getFloat("humMax", DEFAULT_HUM_MAX);
   soilThreshold = prefs.getInt("soilTh", DEFAULT_SOIL_THRESHOLD);
   pumpMode = prefs.getString("pumpMode", "duration");
   soilWetTarget = prefs.getInt("wetTarget", DEFAULT_SOIL_WET_TARGET);
@@ -145,8 +168,10 @@ void loadConfig() {
 
 void saveConfig() {
   prefs.begin("watering", false);
-  prefs.putString("mode", mode);
-  prefs.putFloat("tempTh", tempThreshold);
+  prefs.putFloat("tempMin", tempMin);
+  prefs.putFloat("tempMax", tempMax);
+  prefs.putFloat("humMin", humMin);
+  prefs.putFloat("humMax", humMax);
   prefs.putInt("soilTh", soilThreshold);
   prefs.putString("pumpMode", pumpMode);
   prefs.putInt("wetTarget", soilWetTarget);
@@ -219,8 +244,10 @@ void recordWateringEvent(int soilAfter) {
 
 void pushConfig() {
   StaticJsonDocument<768> doc;
-  doc["mode"] = mode;
-  doc["tempThreshold"] = tempThreshold;
+  doc["tempMin"] = tempMin;
+  doc["tempMax"] = tempMax;
+  doc["humMin"] = humMin;
+  doc["humMax"] = humMax;
   doc["soilThreshold"] = soilThreshold;
   doc["pumpMode"] = pumpMode;
   doc["soilWetTarget"] = soilWetTarget;
@@ -243,8 +270,10 @@ void pushConfig() {
 }
 
 void resetToDefaults() {
-  mode = "default";
-  tempThreshold = DEFAULT_TEMP_THRESHOLD;
+  tempMin = DEFAULT_TEMP_MIN;
+  tempMax = DEFAULT_TEMP_MAX;
+  humMin = DEFAULT_HUM_MIN;
+  humMax = DEFAULT_HUM_MAX;
   soilThreshold = DEFAULT_SOIL_THRESHOLD;
   pumpMode = "duration";
   soilWetTarget = DEFAULT_SOIL_WET_TARGET;
@@ -277,8 +306,10 @@ class ConfigCallbacks : public NimBLECharacteristicCallbacks {
     String value = c->getValue().c_str();
     StaticJsonDocument<768> doc;
     if (deserializeJson(doc, value) == DeserializationError::Ok) {
-      if (doc.containsKey("mode")) mode = doc["mode"].as<String>();
-      if (doc.containsKey("tempThreshold")) tempThreshold = doc["tempThreshold"];
+      if (doc.containsKey("tempMin")) tempMin = doc["tempMin"];
+      if (doc.containsKey("tempMax")) tempMax = doc["tempMax"];
+      if (doc.containsKey("humMin")) humMin = doc["humMin"];
+      if (doc.containsKey("humMax")) humMax = doc["humMax"];
       if (doc.containsKey("soilThreshold")) soilThreshold = doc["soilThreshold"];
       if (doc.containsKey("pumpMode")) pumpMode = doc["pumpMode"].as<String>();
       if (doc.containsKey("soilWetTarget")) soilWetTarget = doc["soilWetTarget"];
@@ -313,6 +344,8 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
     String cmd = c->getValue().c_str();
     if (cmd == "WATER_NOW") {
       pendingWaterNow = true;
+    } else if (cmd == "STOP_NOW") {
+      pendingStopNow = true;
     } else if (cmd == "RESET_DEFAULTS") {
       pendingReset = true;
     } else if (cmd == "REFRESH") {
@@ -365,69 +398,98 @@ int dayOfWeekFor(unsigned long epoch) {
   return (int)(((epoch / 86400UL) + 4) % 7);
 }
 
-// ---------- Pump ----------
-void waterPlant(bool manual) {
+// ---------- Pump (non-blocking state machine, driven by updatePump() in loop()) ----------
+void startWatering(bool manual) {
+  if (pumpActive) return; // already running — a manual tap or an auto/schedule
+                          // trigger during an existing run is just a no-op
+
   unsigned long now = millis();
   if (!manual && (now - lastWaterMillis < MIN_WATER_INTERVAL_MS)) {
     return; // auto watering (condition or schedule) is on cooldown, ignore for now
   }
 
-  pumpOn = true;
-  unsigned long startMillis = millis();
+  pumpActive = true;
+  pumpRequestStop = false;
+  pumpStartMillis = now;
+  pumpPhaseStartMillis = now;
   // "duration" mode runs up to the configured length; "moisture" mode runs up
   // to the hard safety cap instead, since its whole point is to keep going
   // until the target is reached (or the cap saves it from a bad sensor/empty
   // reservoir).
-  unsigned long maxRunMs = (pumpMode == "moisture") ? PUMP_SAFETY_MAX_MS : pumpDurationMs;
-  int soilAfter = -1;
+  pumpMaxRunMs = (pumpMode == "moisture") ? PUMP_SAFETY_MAX_MS : pumpDurationMs;
+  pumpRelayOn = true;
+  pumpOn = true;
+  digitalWrite(RELAY_PIN, HIGH); // adjust to LOW if your relay is active-low
 
-  // Pulse the pump and re-check moisture between bursts (rather than one
-  // continuous run) so the reading reflects water that's actually reached
-  // the sensor. Whatever the mode, soilMaxPercent is a universal cutoff:
-  // watering always stops immediately once soil is at/above it, even if
-  // there's time (or moisture-target headroom) left.
-  while (true) {
-    unsigned long elapsed = millis() - startMillis;
-    if (elapsed >= maxRunMs) break;
+  publishPumpStatus(); // instant UI feedback instead of waiting for the next periodic publish
+}
 
-    unsigned long remaining = maxRunMs - elapsed;
-    unsigned long pulse = (PUMP_PULSE_MS < remaining) ? PUMP_PULSE_MS : remaining;
-
-    digitalWrite(RELAY_PIN, HIGH); // adjust to LOW if your relay is active-low
-    delay(pulse);
-    digitalWrite(RELAY_PIN, LOW);
-
-    soilAfter = readMoisturePercent();
-    if (soilAfter >= soilMaxPercent) break;
-    if (pumpMode == "moisture" && soilAfter >= soilWetTarget) break;
-
-    elapsed = millis() - startMillis;
-    if (elapsed >= maxRunMs) break;
-    remaining = maxRunMs - elapsed;
-    unsigned long settle = (PUMP_SETTLE_MS < remaining) ? PUMP_SETTLE_MS : remaining;
-    delay(settle);
-  }
-
+void stopWatering() {
+  digitalWrite(RELAY_PIN, LOW);
+  pumpRelayOn = false;
+  pumpActive = false;
   pumpOn = false;
-  lastWaterMillis = now;
+  lastWaterMillis = millis();
 
-  if (soilAfter < 0) soilAfter = readMoisturePercent();
+  int soilAfter = readMoisturePercent();
   recordWateringEvent(soilAfter);
 
   if (deviceConnected) {
     eventChar->setValue("WATERED");
     eventChar->notify();
   }
+  publishPumpStatus(); // instant UI feedback instead of waiting for the next periodic publish
+}
+
+// Advances the pump's on/off pulsing by one step. Pulses (rather than one
+// continuous run) so soil readings between bursts reflect water that's
+// actually reached the sensor. Whatever the mode, soilMaxPercent is a
+// universal cutoff: watering always stops immediately once soil is at/above
+// it, even if there's time (or moisture-target headroom) left. Called every
+// loop() iteration so an emergency stop or a sensor publish can happen
+// mid-watering instead of waiting up to ~20s for one blocking call to finish.
+void updatePump() {
+  if (!pumpActive) return;
+
+  if (pumpRequestStop) {
+    stopWatering();
+    return;
+  }
+
+  unsigned long now = millis();
+  unsigned long totalElapsed = now - pumpStartMillis;
+  if (totalElapsed >= pumpMaxRunMs) {
+    stopWatering();
+    return;
+  }
+
+  unsigned long phaseElapsed = now - pumpPhaseStartMillis;
+  unsigned long remaining = pumpMaxRunMs - totalElapsed;
+
+  if (pumpRelayOn) {
+    unsigned long pulse = (PUMP_PULSE_MS < remaining) ? PUMP_PULSE_MS : remaining;
+    if (phaseElapsed < pulse) return;
+
+    digitalWrite(RELAY_PIN, LOW);
+    pumpRelayOn = false;
+    pumpPhaseStartMillis = now;
+
+    int soil = readMoisturePercent();
+    if (soil >= soilMaxPercent || (pumpMode == "moisture" && soil >= soilWetTarget)) {
+      stopWatering();
+    }
+  } else {
+    unsigned long settle = (PUMP_SETTLE_MS < remaining) ? PUMP_SETTLE_MS : remaining;
+    if (phaseElapsed < settle) return;
+
+    digitalWrite(RELAY_PIN, HIGH);
+    pumpRelayOn = true;
+    pumpPhaseStartMillis = now;
+  }
 }
 
 // ---------- Main sensor + decision cycle ----------
-void publishSensorData() {
-  bool ok = readDHTWithRetry(lastTemp, lastHum);
-  if (!ok) {
-    Serial.println("DHT read failed after retries, using last known values.");
-  }
-  int moisture = readMoisturePercent();
-
+void notifySensor(int moisture) {
   StaticJsonDocument<128> doc;
   doc["temp"] = lastTemp;
   doc["hum"] = lastHum;
@@ -442,16 +504,35 @@ void publishSensorData() {
     sensorChar->setValue(out.c_str());
     sensorChar->notify();
   }
+}
 
-  // Auto-watering: warm enough AND soil is dry
-  if (!isnan(lastTemp) && lastTemp >= tempThreshold && moisture < soilThreshold) {
-    waterPlant(false);
+// Cheap pump-state-only push (no DHT re-read) for instant UI feedback right
+// when watering starts/stops, without waiting for the next periodic publish.
+void publishPumpStatus() {
+  notifySensor(readMoisturePercent());
+}
+
+void checkAutoWater(int moisture) {
+  if (pumpActive) return;
+  bool tempOk = !isnan(lastTemp) && lastTemp >= tempMin && lastTemp <= tempMax;
+  bool humOk = !isnan(lastHum) && lastHum >= humMin && lastHum <= humMax;
+  bool soilDry = moisture < soilThreshold;
+  if (tempOk && humOk && soilDry) startWatering(false);
+}
+
+void publishSensorData() {
+  bool ok = readDHTWithRetry(lastTemp, lastHum);
+  if (!ok) {
+    Serial.println("DHT read failed after retries, using last known values.");
   }
+  int moisture = readMoisturePercent();
+  notifySensor(moisture);
+  checkAutoWater(moisture);
 }
 
 // ---------- Scheduled watering ----------
 void checkSchedule() {
-  if (!timeSynced || !schedEnabled) return;
+  if (!timeSynced || !schedEnabled || pumpActive) return;
 
   unsigned long epoch = currentLocalEpoch();
   int dow = dayOfWeekFor(epoch);
@@ -466,13 +547,13 @@ void checkSchedule() {
     int intervalHours = schedIntervalHours > 0 ? schedIntervalHours : 1;
     if (minute == 0 && (epochHour % intervalHours) == 0 && epochHour != lastSchedHourFired) {
       lastSchedHourFired = epochHour;
-      waterPlant(false);
+      startWatering(false);
     }
   } else { // "daily"
     unsigned long daysSinceEpoch = epoch / 86400UL;
     if (hour == schedHour && minute == schedMinute && daysSinceEpoch != lastSchedDayFired) {
       lastSchedDayFired = daysSinceEpoch;
-      waterPlant(false);
+      startWatering(false);
     }
   }
 }
@@ -548,7 +629,11 @@ void loop() {
 
   if (pendingWaterNow) {
     pendingWaterNow = false;
-    waterPlant(true);
+    startWatering(true);
+  }
+  if (pendingStopNow) {
+    pendingStopNow = false;
+    if (pumpActive) pumpRequestStop = true;
   }
   if (pendingReset) {
     pendingReset = false;
@@ -558,6 +643,8 @@ void loop() {
     pendingRefresh = false;
     publishSensorData();
   }
+
+  updatePump(); // non-blocking pump pulsing/cutoff check, every tick
 
   unsigned long now = millis();
   if (now - lastCheck >= CHECK_INTERVAL_MS) {
