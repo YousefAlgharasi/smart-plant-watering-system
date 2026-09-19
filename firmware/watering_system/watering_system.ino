@@ -35,6 +35,7 @@
 #define COMMAND_CHAR_UUID "12345678-1234-5678-1234-56789abc0004"
 #define TIME_CHAR_UUID    "12345678-1234-5678-1234-56789abc0005"
 #define HISTORY_CHAR_UUID "12345678-1234-5678-1234-56789abc0006"
+#define LOG_CHAR_UUID     "12345678-1234-5678-1234-56789abc0007"
 #define DEVICE_NAME       "PlantWaterer"
 
 // On-device watering log so the app can catch up on events that happened
@@ -43,7 +44,6 @@
 #define HISTORY_CAPACITY 10
 
 // ---------- Timing ----------
-const unsigned long CHECK_INTERVAL_MS     = 10000;   // how often to read sensors
 const unsigned long PUMP_SAFETY_MAX_MS    = 20000;   // hard cap for moisture-feedback mode, no matter what
 const unsigned long PUMP_PULSE_MS         = 1500;    // moisture mode: burst length between checks
 const unsigned long PUMP_SETTLE_MS        = 800;     // moisture mode: pause after a burst so the reading reflects reality
@@ -63,6 +63,10 @@ const int   DEFAULT_SOIL_MAX_PERCENT = 80;  // universal safety cap: stop ANY wa
 // set higher in Settings to space out real-world AUTO waterings (manual
 // "Water Now" always bypasses this regardless of its value).
 const unsigned long DEFAULT_MIN_WATER_INTERVAL_MS = 0;
+// How often sensors are read/published — fast (1s) by default so changes are
+// immediately visible for demos/testing; raise it in Settings for real-world
+// use to cut down on DHT reads and BLE notify traffic.
+const unsigned long DEFAULT_SENSOR_INTERVAL_MS = 1000;
 
 DHT dht(DHTPIN, DHTTYPE);
 Preferences prefs;
@@ -74,6 +78,7 @@ NimBLECharacteristic *configChar;
 NimBLECharacteristic *commandChar;
 NimBLECharacteristic *timeChar;
 NimBLECharacteristic *historyChar;
+NimBLECharacteristic *logChar;
 
 bool deviceConnected = false;
 
@@ -99,6 +104,7 @@ int soilWetTarget = DEFAULT_SOIL_WET_TARGET;
 unsigned long pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
 int soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT; // stop any watering immediately once soil hits this %
 unsigned long minWaterIntervalMs = DEFAULT_MIN_WATER_INTERVAL_MS; // cooldown between AUTO waterings (manual bypasses it)
+unsigned long sensorIntervalMs = DEFAULT_SENSOR_INTERVAL_MS; // how often sensors are read/published
 
 // ---------- Schedule ----------
 bool schedEnabled = true;
@@ -152,6 +158,20 @@ void publishSensorData();
 void publishPumpStatus();
 void startWatering(bool manual);
 
+// ---------- Debug log (mirrors Serial to a BLE characteristic for the web
+// app's live "Console" tab — testing/debugging only, no functional effect) ----------
+void logLine(const String &msg) {
+  Serial.println(msg);
+  if (deviceConnected) {
+    // BLE notifications are capped by the negotiated ATT MTU (default as low
+    // as 20-ish bytes, often 200+ in practice); a message longer than that
+    // just gets truncated on the wire for this live view. Serial above still
+    // gets the full text either way.
+    logChar->setValue(msg.c_str());
+    logChar->notify();
+  }
+}
+
 // ---------- Config persistence ----------
 void loadConfig() {
   prefs.begin("watering", true);
@@ -165,6 +185,7 @@ void loadConfig() {
   pumpDurationMs = prefs.getULong("pumpDurMs", DEFAULT_PUMP_DURATION_MS);
   soilMaxPercent = prefs.getInt("soilMax", DEFAULT_SOIL_MAX_PERCENT);
   minWaterIntervalMs = prefs.getULong("cooldownMs", DEFAULT_MIN_WATER_INTERVAL_MS);
+  sensorIntervalMs = prefs.getULong("sensorIntMs", DEFAULT_SENSOR_INTERVAL_MS);
   schedEnabled = prefs.getBool("schedOn", true);
   schedMode = prefs.getString("schedMode", "daily");
   schedHour = prefs.getInt("schedHour", 5);
@@ -186,6 +207,7 @@ void saveConfig() {
   prefs.putULong("pumpDurMs", pumpDurationMs);
   prefs.putInt("soilMax", soilMaxPercent);
   prefs.putULong("cooldownMs", minWaterIntervalMs);
+  prefs.putULong("sensorIntMs", sensorIntervalMs);
   prefs.putBool("schedOn", schedEnabled);
   prefs.putString("schedMode", schedMode);
   prefs.putInt("schedHour", schedHour);
@@ -236,13 +258,11 @@ void updateHistoryChar() {
   serializeJson(doc, out);
   historyChar->setValue(out.c_str());
 
-  Serial.print("[history] entries="); Serial.print(historyCount);
-  Serial.print(" overflowed="); Serial.print(doc.overflowed());
-  Serial.print(" json="); Serial.println(out);
+  logLine("[history] entries=" + String(historyCount) + " overflowed=" + String(doc.overflowed()) + " json=" + out);
 }
 
 void recordWateringEvent(int soilAfter) {
-  Serial.print("[history] recording watering event, soilAfter="); Serial.println(soilAfter);
+  logLine("[history] recording watering event, soilAfter=" + String(soilAfter));
   WateringLogEntry &entry = history[historyHead];
   entry.epoch = timeSynced ? (uint32_t)currentLocalEpoch() : 0;
   entry.temp = lastTemp;
@@ -268,6 +288,7 @@ void pushConfig() {
   doc["pumpDurationMs"] = pumpDurationMs;
   doc["soilMaxPercent"] = soilMaxPercent;
   doc["cooldownMs"] = minWaterIntervalMs;
+  doc["sensorIntervalMs"] = sensorIntervalMs;
 
   JsonObject sched = doc.createNestedObject("schedule");
   sched["enabled"] = schedEnabled;
@@ -295,6 +316,7 @@ void resetToDefaults() {
   pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
   soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT;
   minWaterIntervalMs = DEFAULT_MIN_WATER_INTERVAL_MS;
+  sensorIntervalMs = DEFAULT_SENSOR_INTERVAL_MS;
   schedEnabled = true;
   schedMode = "daily";
   schedHour = 5;
@@ -332,6 +354,7 @@ class ConfigCallbacks : public NimBLECharacteristicCallbacks {
       if (doc.containsKey("pumpDurationMs")) pumpDurationMs = doc["pumpDurationMs"];
       if (doc.containsKey("soilMaxPercent")) soilMaxPercent = doc["soilMaxPercent"];
       if (doc.containsKey("cooldownMs")) minWaterIntervalMs = doc["cooldownMs"];
+      if (doc.containsKey("sensorIntervalMs")) sensorIntervalMs = doc["sensorIntervalMs"];
 
       if (doc.containsKey("schedule")) {
         JsonObject sched = doc["schedule"];
@@ -422,8 +445,7 @@ void startWatering(bool manual) {
 
   unsigned long now = millis();
   if (!manual && (now - lastWaterMillis < minWaterIntervalMs)) {
-    Serial.print("[auto-water] blocked by cooldown, ms remaining=");
-    Serial.println(minWaterIntervalMs - (now - lastWaterMillis));
+    logLine("[auto-water] blocked by cooldown, ms remaining=" + String(minWaterIntervalMs - (now - lastWaterMillis)));
     return; // auto watering (condition or schedule) is on cooldown, ignore for now
   }
 
@@ -517,12 +539,11 @@ void notifySensor(int moisture) {
   String out;
   serializeJson(doc, out);
 
-  Serial.println(out);
-
   if (deviceConnected) {
     sensorChar->setValue(out.c_str());
     sensorChar->notify();
   }
+  logLine(out);
 }
 
 // Cheap pump-state-only push (no DHT re-read) for instant UI feedback right
@@ -536,16 +557,14 @@ void checkAutoWater(int moisture) {
   bool humOk = !isnan(lastHum) && lastHum >= humMin && lastHum <= humMax;
   bool soilDry = moisture < soilThreshold;
 
-  Serial.print("[auto-water] temp="); Serial.print(lastTemp);
-  Serial.print(" (need "); Serial.print(tempMin); Serial.print("-"); Serial.print(tempMax);
-  Serial.print(", ok="); Serial.print(tempOk);
-  Serial.print(") hum="); Serial.print(lastHum);
-  Serial.print(" (need "); Serial.print(humMin); Serial.print("-"); Serial.print(humMax);
-  Serial.print(", ok="); Serial.print(humOk);
-  Serial.print(") soil="); Serial.print(moisture);
-  Serial.print(" (need <"); Serial.print(soilThreshold);
-  Serial.print(", dry="); Serial.print(soilDry);
-  Serial.print(") pumpActive="); Serial.println(pumpActive);
+  String line = "[auto-water] temp=" + String(lastTemp)
+    + " (need " + String(tempMin) + "-" + String(tempMax) + ", ok=" + String(tempOk)
+    + ") hum=" + String(lastHum)
+    + " (need " + String(humMin) + "-" + String(humMax) + ", ok=" + String(humOk)
+    + ") soil=" + String(moisture)
+    + " (need <" + String(soilThreshold) + ", dry=" + String(soilDry)
+    + ") pumpActive=" + String(pumpActive);
+  logLine(line);
 
   if (pumpActive) return;
   if (tempOk && humOk && soilDry) startWatering(false);
@@ -554,7 +573,7 @@ void checkAutoWater(int moisture) {
 void publishSensorData() {
   bool ok = readDHTWithRetry(lastTemp, lastHum);
   if (!ok) {
-    Serial.println("DHT read failed after retries, using last known values.");
+    logLine("DHT read failed after retries, using last known values.");
   }
   int moisture = readMoisturePercent();
   notifySensor(moisture);
@@ -610,15 +629,13 @@ void setup() {
   // (or the values look wrong) after uploading, the ESP32 is still running
   // an older sketch and needs a fresh upload.
   Serial.println("=== PlantWaterer firmware: range-based auto-water + emergency stop + history sync ===");
-  Serial.print("tempMin="); Serial.print(tempMin);
-  Serial.print(" tempMax="); Serial.print(tempMax);
-  Serial.print(" humMin="); Serial.print(humMin);
-  Serial.print(" humMax="); Serial.print(humMax);
-  Serial.print(" soilThreshold="); Serial.print(soilThreshold);
-  Serial.print(" pumpMode="); Serial.print(pumpMode);
-  Serial.print(" soilMaxPercent="); Serial.print(soilMaxPercent);
-  Serial.print(" minWaterIntervalMs="); Serial.print(minWaterIntervalMs);
-  Serial.print(" historyCount="); Serial.println(historyCount);
+  Serial.println("tempMin=" + String(tempMin) + " tempMax=" + String(tempMax)
+    + " humMin=" + String(humMin) + " humMax=" + String(humMax)
+    + " soilThreshold=" + String(soilThreshold) + " pumpMode=" + pumpMode
+    + " soilMaxPercent=" + String(soilMaxPercent)
+    + " minWaterIntervalMs=" + String(minWaterIntervalMs)
+    + " sensorIntervalMs=" + String(sensorIntervalMs)
+    + " historyCount=" + String(historyCount));
 
   NimBLEDevice::init(DEVICE_NAME);
   pServer = NimBLEDevice::createServer();
@@ -661,6 +678,11 @@ void setup() {
     NIMBLE_PROPERTY::READ
   );
 
+  logChar = service->createCharacteristic(
+    LOG_CHAR_UUID,
+    NIMBLE_PROPERTY::NOTIFY
+  );
+
   service->start();
   pushConfig();
   updateHistoryChar(); // so a fresh connection can read persisted history right away
@@ -700,7 +722,7 @@ void loop() {
   updatePump(); // non-blocking pump pulsing/cutoff check, every tick
 
   unsigned long now = millis();
-  if (now - lastCheck >= CHECK_INTERVAL_MS) {
+  if (now - lastCheck >= sensorIntervalMs) {
     lastCheck = now;
     publishSensorData();
     checkSchedule();

@@ -229,6 +229,16 @@
   .history-time { font-weight: 600; }
   .history-detail { color: var(--color-text-muted); text-align: right; }
 
+  .console-log {
+    background: #141814; color: #b7f7c0; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 12px; line-height: 1.5; border-radius: 10px; padding: 12px;
+    height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    margin-bottom: 12px;
+  }
+  .console-log .line { display: block; }
+  .console-log .line .ts { color: #6f8f74; margin-right: 6px; }
+  .console-log .empty { color: #6f8f74; }
+
   .toast {
     position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px);
     background: var(--color-primary-dark); color: #fff; padding: 14px 22px; border-radius: 999px;
@@ -275,6 +285,7 @@
       <button type="button" class="tab-btn active" data-tab="dashboard" role="tab" aria-selected="true">Dashboard</button>
       <button type="button" class="tab-btn" data-tab="history" role="tab" aria-selected="false">History</button>
       <button type="button" class="tab-btn" data-tab="settings" role="tab" aria-selected="false">Settings</button>
+      <button type="button" class="tab-btn" data-tab="console" role="tab" aria-selected="false">Console</button>
     </nav>
 
     <section id="tab-dashboard" class="tab-panel">
@@ -414,11 +425,29 @@
         <p class="hint-small">The ESP32 has no clock of its own — this page keeps it in sync with your phone's clock whenever it's connected.</p>
       </section>
 
+      <section class="settings-card">
+        <h2>Advanced <span style="font-weight:400; color:var(--color-text-muted); font-size:13px;">(testing)</span></h2>
+        <label class="field-label" for="sensor-interval">Sensor read interval (ms)</label>
+        <input type="number" id="sensor-interval" step="100" min="0" value="1000" />
+        <p class="hint-small">How often the device reads sensors and checks auto-watering. Lower = faster feedback for testing; raise it for real-world use.</p>
+      </section>
+
       <div class="actions">
         <button type="button" id="save-settings-btn" class="primary-btn">Save</button>
         <button type="button" id="reset-settings-btn" class="danger-btn">Reset to Default</button>
       </div>
       <p id="settings-status" class="status-text" aria-live="polite"></p>
+    </section>
+
+    <section id="tab-console" class="tab-panel hidden">
+      <section class="settings-card">
+        <h2>Live Console <span style="font-weight:400; color:var(--color-text-muted); font-size:13px;">(testing)</span></h2>
+        <p class="hint-small">Mirrors what the device prints to its Serial Monitor, live over Bluetooth, for testing without a USB cable.</p>
+        <div id="console-log" class="console-log" aria-live="polite"><span class="empty">Waiting for device output…</span></div>
+        <div class="actions">
+          <button type="button" id="clear-console-btn" class="primary-btn">Clear</button>
+        </div>
+      </section>
     </section>
   </section>
 </div>
@@ -436,6 +465,8 @@
   var COMMAND_CHAR_UUID = '12345678-1234-5678-1234-56789abc0004';
   var TIME_CHAR_UUID = '12345678-1234-5678-1234-56789abc0005';
   var HISTORY_CHAR_UUID = '12345678-1234-5678-1234-56789abc0006';
+  var LOG_CHAR_UUID = '12345678-1234-5678-1234-56789abc0007';
+  var CONSOLE_MAX_LINES = 300;
   var DEVICE_NAME = 'PlantWaterer';
   var REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   var HISTORY_LIMIT = 50;
@@ -589,6 +620,7 @@
     tabDashboard: document.getElementById('tab-dashboard'),
     tabHistory: document.getElementById('tab-history'),
     tabSettings: document.getElementById('tab-settings'),
+    tabConsole: document.getElementById('tab-console'),
 
     updateTicker: document.getElementById('update-ticker'),
     cardTemp: document.getElementById('card-temp'),
@@ -629,12 +661,16 @@
     schedTime: document.getElementById('sched-time'),
     schedIntervalHours: document.getElementById('sched-interval-hours'),
     dayToggles: document.getElementById('day-toggles'),
+    sensorInterval: document.getElementById('sensor-interval'),
 
     saveSettingsBtn: document.getElementById('save-settings-btn'),
     resetSettingsBtn: document.getElementById('reset-settings-btn'),
     settingsStatus: document.getElementById('settings-status'),
     historyList: document.getElementById('history-list'),
     toast: document.getElementById('toast'),
+
+    consoleLog: document.getElementById('console-log'),
+    clearConsoleBtn: document.getElementById('clear-console-btn'),
   };
 
   // ---------- BLE state ----------
@@ -646,6 +682,7 @@
     commandChar: null,
     timeChar: null,
     historyChar: null,
+    logChar: null,
   };
   var lastReading = null;
   var lastReadingAt = null;
@@ -705,6 +742,17 @@
     ble.commandChar = commandChar;
     ble.timeChar = timeChar;
     ble.historyChar = historyChar;
+
+    // Optional: older firmware won't have this characteristic yet — degrade
+    // gracefully (Console tab just stays empty) instead of failing to connect.
+    try {
+      var logChar = await service.getCharacteristic(LOG_CHAR_UUID);
+      ble.logChar = logChar;
+      logChar.addEventListener('characteristicvaluechanged', handleLogNotification);
+      await logChar.startNotifications();
+    } catch (err) {
+      console.warn('No LOG characteristic on this device — firmware needs a fresh upload for the Console tab.', err);
+    }
 
     sensorChar.addEventListener('characteristicvaluechanged', handleSensorNotification);
     await sensorChar.startNotifications();
@@ -771,6 +819,32 @@
     showToast('🌱 Plant watered!');
   }
 
+  function handleLogNotification(event) {
+    appendConsoleLine(decodeText(event.target.value));
+  }
+
+  function appendConsoleLine(text) {
+    if (el.consoleLog.querySelector('.empty')) el.consoleLog.innerHTML = '';
+
+    var line = document.createElement('span');
+    line.className = 'line';
+    var ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = new Date().toLocaleTimeString();
+    line.appendChild(ts);
+    line.appendChild(document.createTextNode(text));
+    el.consoleLog.appendChild(line);
+
+    while (el.consoleLog.childElementCount > CONSOLE_MAX_LINES) {
+      el.consoleLog.removeChild(el.consoleLog.firstChild);
+    }
+    el.consoleLog.scrollTop = el.consoleLog.scrollHeight;
+  }
+
+  function clearConsole() {
+    el.consoleLog.innerHTML = '<span class="empty">Waiting for device output…</span>';
+  }
+
   function applyConfigValue(dataView) {
     var text = decodeText(dataView);
     try {
@@ -795,6 +869,7 @@
     ble.commandChar = null;
     ble.timeChar = null;
     ble.historyChar = null;
+    ble.logChar = null;
     lastReading = null;
     lastReadingAt = null;
     updatePumpUI(false);
@@ -883,7 +958,7 @@
   }
 
   function switchTab(name) {
-    var panels = { dashboard: el.tabDashboard, history: el.tabHistory, settings: el.tabSettings };
+    var panels = { dashboard: el.tabDashboard, history: el.tabHistory, settings: el.tabSettings, console: el.tabConsole };
     Object.keys(panels).forEach(function (key) {
       panels[key].classList.toggle('hidden', key !== name);
     });
@@ -977,6 +1052,7 @@
     if (typeof config.humMax === 'number') el.humMax.value = config.humMax;
     if (typeof config.soilThreshold === 'number') el.soilThreshold.value = config.soilThreshold;
     if (typeof config.cooldownMs === 'number') el.waterCooldown.value = Math.round(config.cooldownMs / 1000);
+    if (typeof config.sensorIntervalMs === 'number') el.sensorInterval.value = config.sensorIntervalMs;
 
     el.pumpModeSelect.value = config.pumpMode === 'moisture' ? 'moisture' : 'duration';
     if (typeof config.soilWetTarget === 'number') el.soilWetTarget.value = config.soilWetTarget;
@@ -1158,9 +1234,10 @@
     var pumpDurationSec = parseInt(el.pumpDuration.value, 10);
     var soilMaxPercent = parseInt(el.soilMaxPercent.value, 10);
     var cooldownSec = parseInt(el.waterCooldown.value, 10);
+    var sensorIntervalMs = parseInt(el.sensorInterval.value, 10);
     var intervalHours = parseInt(el.schedIntervalHours.value, 10);
 
-    var allValues = [tempMin, tempMax, humMin, humMax, soilThreshold, soilWetTarget, pumpDurationSec, soilMaxPercent, cooldownSec, intervalHours];
+    var allValues = [tempMin, tempMax, humMin, humMax, soilThreshold, soilWetTarget, pumpDurationSec, soilMaxPercent, cooldownSec, sensorIntervalMs, intervalHours];
     if (allValues.some(function (n) { return Number.isNaN(n); })) {
       setSettingsStatus('Enter valid numbers before saving.');
       return;
@@ -1182,6 +1259,7 @@
       pumpDurationMs: pumpDurationSec * 1000,
       soilMaxPercent: soilMaxPercent,
       cooldownMs: cooldownSec * 1000,
+      sensorIntervalMs: sensorIntervalMs,
       schedule: {
         enabled: el.schedEnabledToggle.checked,
         mode: el.schedModeSelect.value,
@@ -1191,6 +1269,10 @@
         days: scheduleDays.slice(),
       },
     };
+
+    if (!window.confirm('Save these settings to the device?')) {
+      return;
+    }
 
     try {
       await writeConfig(config);
@@ -1210,6 +1292,8 @@
       setSettingsStatus('Reset failed — check the connection.');
     }
   });
+
+  el.clearConsoleBtn.addEventListener('click', clearConsole);
 
   // ---------- Init ----------
   if (!isWebBluetoothSupported()) {
