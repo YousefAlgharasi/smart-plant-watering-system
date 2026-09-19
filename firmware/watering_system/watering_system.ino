@@ -8,6 +8,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <DNSServer.h>
 
 // ---------- Pins ----------
 #define DHTPIN 16
@@ -30,20 +31,28 @@
 // 0 for normal operation.
 #define DEBUG_SOIL_RAW 0
 
-// ---------- WiFi (STA optional, AP always on — both run alongside Bluetooth,
-// which keeps working unchanged either way) ----------
-// STA: fill in your home network's credentials before uploading to also reach
-// the device from your home WiFi at http://plantwaterer.local/. Leave
-// WIFI_SSID empty ("") to skip STA — the AP below still always starts.
-// Never commit your real credentials — keep this file local to your device.
+// ---------- WiFi (STA optional, AP always on except during first-time
+// provisioning — all of this runs alongside Bluetooth, which keeps working
+// unchanged either way) ----------
+// STA: fill in your home network's credentials before uploading, or leave
+// WIFI_SSID blank and use the SmartGrow-Setup provisioning flow below
+// instead. Once connected, the dashboard also reaches the device at
+// http://plantwaterer.local/. Never commit your real credentials — keep
+// this file local to your device.
 #define WIFI_SSID     ""
 #define WIFI_PASSWORD ""
 #define WIFI_HOSTNAME "plantwaterer"
-// AP: the ESP32 always creates this network too, so a phone can connect
-// directly with no router or internet at all, at the fixed address below.
+// AP: the ESP32 always broadcasts one of these two networks — only one AP
+// SSID can be active on the radio at a time, so the control AP and the
+// provisioning AP below are mutually exclusive, never simultaneous.
 #define AP_SSID     "SmartGrow"
 #define AP_PASSWORD "12345678"
 #define AP_IP_ADDR  192, 168, 4, 1
+// Provisioning AP: shown instead of AP_SSID only while no STA network has
+// been saved yet (fresh device, or after a WIFI_RESET). Serves a page at
+// http://192.168.4.1/ to enter a home network's SSID/password.
+#define PROV_AP_SSID     "SmartGrow-Setup"
+#define PROV_AP_PASSWORD "12345678"
 
 // ---------- BLE UUIDs (must match the app's src/constants/ble.ts) ----------
 #define SERVICE_UUID      "12345678-1234-5678-1234-56789abc0000"
@@ -107,6 +116,23 @@ bool deviceConnected = false;
 // functions, so the two transports can never drift out of sync.
 WebServer webServer(80);
 bool wifiReady = false;
+IPAddress apIP(AP_IP_ADDR); // shared by both AP identities — same fixed address either way
+
+// ---------- WiFi provisioning (SmartGrow-Setup) ----------
+// Runs only until a STA network has been saved; the control AP/HTTP API/BLE
+// above are untouched either way. DNS + the HTTP catch-all below implement a
+// minimal captive portal so most phones offer the setup page on their own.
+DNSServer dnsServer;
+const unsigned long STA_CONNECT_TIMEOUT_MS = 15000;
+enum ProvisioningState { PROV_IDLE, PROV_CONNECTING, PROV_FAILED };
+bool provisioningActive = false;
+ProvisioningState provState = PROV_IDLE;
+String staSsidSaved;
+String staPassSaved;
+String pendingStaSsid;
+String pendingStaPass;
+String provisioningError;
+unsigned long staConnectStartMillis = 0;
 
 #define LOG_BUFFER_CAPACITY 50
 String logBuffer[LOG_BUFFER_CAPACITY];
@@ -187,6 +213,7 @@ volatile bool pendingWaterNow = false;
 volatile bool pendingStopNow = false;
 volatile bool pendingReset = false;
 volatile bool pendingRefresh = false;
+volatile bool pendingWifiReset = false;
 
 void publishSensorData();
 void publishPumpStatus();
@@ -258,6 +285,39 @@ void saveConfig() {
   prefs.putInt("schedIntH", schedIntervalHours);
   prefs.putUChar("schedDays", schedDaysMask);
   prefs.end();
+}
+
+// ---------- STA Wi-Fi credential persistence (separate keys from the rest
+// of the config above, so a Wi-Fi reset never touches irrigation settings) ----------
+void loadWifiCreds() {
+  prefs.begin("watering", true);
+  staSsidSaved = prefs.getString("staSsid", WIFI_SSID);
+  staPassSaved = prefs.getString("staPass", WIFI_PASSWORD);
+  prefs.end();
+}
+
+void saveWifiCreds(const String &ssid, const String &pass) {
+  prefs.begin("watering", false);
+  prefs.putString("staSsid", ssid);
+  prefs.putString("staPass", pass);
+  prefs.end();
+}
+
+void clearWifiCreds() {
+  prefs.begin("watering", false);
+  prefs.remove("staSsid");
+  prefs.remove("staPass");
+  prefs.end();
+}
+
+// Shared by the BLE COMMAND "WIFI_RESET" and HTTP POST /wifi/reset — the only
+// place that drops a saved STA network. Restarting is simpler and safer than
+// tearing down an active STA/mDNS/AP identity in place, and setup() already
+// knows to fall back into provisioning once staSsidSaved comes back empty.
+void resetWifiCredentials() {
+  clearWifiCreds();
+  logLine("[wifi] credentials cleared, restarting into provisioning mode");
+  ESP.restart();
 }
 
 // ---------- History persistence ----------
@@ -460,6 +520,8 @@ void applyCommand(const String &cmd) {
     setSystemEnabled(true);
   } else if (cmd == "SYSTEM_OFF") {
     setSystemEnabled(false);
+  } else if (cmd == "WIFI_RESET") {
+    pendingWifiReset = true;
   }
 }
 
@@ -777,11 +839,86 @@ void handleApiLogGet() {
   webServer.send(200, "application/json", out);
 }
 
+// Minimal HTML config form served only while provisioningActive — normal
+// operation (control AP and/or STA connected) never reaches this.
+String buildProvisioningPage() {
+  String body = "<!DOCTYPE html><html><head><meta name=\"viewport\" "
+    "content=\"width=device-width,initial-scale=1\"><title>SmartGrow Setup</title></head><body>";
+
+  if (provState == PROV_CONNECTING) {
+    body += "<meta http-equiv=\"refresh\" content=\"2;url=/\">";
+    body += "<h1>Connecting...</h1><p>Attempting to join \"" + pendingStaSsid + "\".</p>";
+  } else if (provState == PROV_FAILED) {
+    body += "<h1>Connection Failed</h1><p>" + provisioningError + "</p>";
+    body += "<form method=\"POST\" action=\"/connect\">"
+      "SSID:<br><input name=\"ssid\" value=\"" + pendingStaSsid + "\"><br>"
+      "Password:<br><input name=\"password\" type=\"password\"><br><br>"
+      "<input type=\"submit\" value=\"Try Again\"></form>";
+  } else {
+    body += "<h1>SmartGrow Wi-Fi Setup</h1>"
+      "<form method=\"POST\" action=\"/connect\">"
+      "SSID:<br><input name=\"ssid\"><br>"
+      "Password:<br><input name=\"password\" type=\"password\"><br><br>"
+      "<input type=\"submit\" value=\"Connect\"></form>";
+  }
+
+  body += "</body></html>";
+  return body;
+}
+
 void handleRoot() {
   sendCorsHeaders();
+  if (provisioningActive) {
+    webServer.send(200, "text/html", buildProvisioningPage());
+    return;
+  }
   webServer.send(200, "text/plain",
     "PlantWaterer is running. Open the dashboard HTML file and use \"Connect via WiFi\" "
     "with host " WIFI_HOSTNAME ".local (or this device's IP address).");
+}
+
+// STA connect itself is async (WiFi.begin() returns immediately); the actual
+// result is picked up non-blockingly by updateProvisioning() in loop(), so
+// this handler never stalls the web server.
+void handleProvisionConnectPost() {
+  sendCorsHeaders();
+  String ssid = webServer.arg("ssid");
+  String pass = webServer.arg("password");
+  ssid.trim();
+
+  if (ssid.length() == 0) {
+    provState = PROV_FAILED;
+    provisioningError = "Please enter a network name.";
+  } else {
+    pendingStaSsid = ssid;
+    pendingStaPass = pass;
+    WiFi.setHostname(WIFI_HOSTNAME);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    provState = PROV_CONNECTING;
+    staConnectStartMillis = millis();
+  }
+
+  webServer.sendHeader("Location", "/");
+  webServer.send(303);
+}
+
+void handleWifiResetPost() {
+  sendCorsHeaders();
+  applyCommand("WIFI_RESET");
+  webServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+// Captive-portal catch-all: any unknown path/host hit while provisioning is
+// active gets bounced to the setup page instead of a bare 404, so most OSes
+// offer to open it on their own without depending on that behavior.
+void handleNotFound() {
+  if (provisioningActive) {
+    webServer.sendHeader("Location", "http://192.168.4.1/");
+    webServer.send(302, "text/plain", "");
+    return;
+  }
+  sendCorsHeaders();
+  webServer.send(404, "application/json", "{\"error\":\"not found\"}");
 }
 
 // Minimal status/control surface for simple external clients (e.g. a plain
@@ -869,52 +1006,109 @@ void setupWebServer() {
 
   webServer.on("/api/log", HTTP_GET, handleApiLogGet);
   webServer.on("/api/log", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/connect", HTTP_POST, handleProvisionConnectPost);
+  webServer.on("/connect", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.on("/wifi/reset", HTTP_POST, handleWifiResetPost);
+  webServer.on("/wifi/reset", HTTP_OPTIONS, handleCorsPreflight);
+
+  webServer.onNotFound(handleNotFound);
 }
 
-void setupWifi() {
-  // AP always starts (no router/internet needed, matches the pre-set
-  // 192.168.4.1 phones connect to directly); STA is optional and additive —
-  // WIFI_AP_STA runs both concurrently without disturbing each other.
-  WiFi.mode(WIFI_AP_STA);
-
-  IPAddress apIP(AP_IP_ADDR);
+void startControlAP() {
+  // No router/internet needed, matches the pre-set 192.168.4.1 phones
+  // connect to directly.
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP(AP_SSID, AP_PASSWORD);
   Serial.print("WiFi AP: SSID='" AP_SSID "' IP=");
   Serial.println(WiFi.softAPIP());
+}
 
-  if (strlen(WIFI_SSID) == 0) {
-    Serial.println("WiFi STA: no SSID configured — AP-only (plus Bluetooth, unaffected).");
+void startProvisioningAP() {
+  // Same fixed address as the control AP — only one is ever broadcasting.
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(PROV_AP_SSID, PROV_AP_PASSWORD);
+  dnsServer.start(53, "*", apIP); // answers every DNS query with our IP (captive portal)
+  provisioningActive = true;
+  provState = PROV_IDLE;
+  Serial.print("WiFi provisioning AP: SSID='" PROV_AP_SSID "' IP=");
+  Serial.println(WiFi.softAPIP());
+}
+
+void startMdns() {
+  if (MDNS.begin(WIFI_HOSTNAME)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS ready: connect the dashboard to http://" WIFI_HOSTNAME ".local/");
   } else {
-    WiFi.setHostname(WIFI_HOSTNAME);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    Serial.print("WiFi STA: connecting to '" WIFI_SSID "'");
+    Serial.println("mDNS failed to start — connect using the STA IP address above instead.");
+  }
+}
 
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-      delay(300);
-      Serial.print(".");
-    }
-    Serial.println();
+// Boot-time-only connect (unchanged 15s blocking retry from PR #9) — used
+// when a STA network is already saved, so there's nothing to provision.
+void connectStaBlocking(const String &ssid, const String &pass) {
+  WiFi.setHostname(WIFI_HOSTNAME);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  Serial.print("WiFi STA: connecting to '" + ssid + "'");
 
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("WiFi STA connected. IP address: ");
-      Serial.println(WiFi.localIP());
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < STA_CONNECT_TIMEOUT_MS) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println();
 
-      if (MDNS.begin(WIFI_HOSTNAME)) {
-        MDNS.addService("http", "tcp", 80);
-        Serial.println("mDNS ready: connect the dashboard to http://" WIFI_HOSTNAME ".local/");
-      } else {
-        Serial.println("mDNS failed to start — connect using the STA IP address above instead.");
-      }
-    } else {
-      Serial.println("WiFi STA: connection failed after 15s — AP mode is still available.");
-    }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi STA connected. IP address: ");
+    Serial.println(WiFi.localIP());
+    startMdns();
+  } else {
+    Serial.println("WiFi STA: connection failed after 15s — AP mode is still available.");
+  }
+}
+
+void setupWifi() {
+  WiFi.mode(WIFI_AP_STA);
+  loadWifiCreds();
+
+  if (staSsidSaved.length() == 0) {
+    startProvisioningAP();
+  } else {
+    startControlAP();
+    connectStaBlocking(staSsidSaved, staPassSaved);
   }
 
   setupWebServer();
   webServer.begin();
   wifiReady = true;
+}
+
+// Non-blocking counterpart to connectStaBlocking(): picks up the result of
+// the WiFi.begin() kicked off by handleProvisionConnectPost() a bit at a
+// time from loop(), instead of stalling the web server for up to 15s.
+void updateProvisioning() {
+  if (!provisioningActive) return;
+  dnsServer.processNextRequest();
+
+  if (provState != PROV_CONNECTING) return;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    saveWifiCreds(pendingStaSsid, pendingStaPass);
+    staSsidSaved = pendingStaSsid;
+    staPassSaved = pendingStaPass;
+    dnsServer.stop();
+    provisioningActive = false;
+    provState = PROV_IDLE;
+    startControlAP();
+    startMdns();
+    logLine("[wifi] provisioning succeeded, joined '" + staSsidSaved + "'");
+  } else if (millis() - staConnectStartMillis > STA_CONNECT_TIMEOUT_MS) {
+    WiFi.disconnect();
+    provState = PROV_FAILED;
+    provisioningError = "Unable to connect to the configured Wi-Fi network. Please check the SSID and password.";
+    logLine("[wifi] provisioning attempt failed for '" + pendingStaSsid + "'");
+  }
 }
 
 void setup() {
@@ -1010,6 +1204,7 @@ void setup() {
 
 void loop() {
   if (wifiReady) webServer.handleClient();
+  updateProvisioning();
 
 #if DEBUG_SOIL_RAW
   Serial.println(analogRead(SOIL_PIN));
@@ -1031,6 +1226,10 @@ void loop() {
   if (pendingRefresh) {
     pendingRefresh = false;
     publishSensorData();
+  }
+  if (pendingWifiReset) {
+    pendingWifiReset = false;
+    resetWifiCredentials(); // restarts the ESP32 — nothing after this line runs
   }
 
   updatePump(); // non-blocking pump pulsing/cutoff check, every tick
