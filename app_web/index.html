@@ -185,6 +185,10 @@
   .field-label { display: block; font-size: 13px; color: var(--color-text-muted); margin: 16px 0 6px; }
   .hint-small { font-size: 12px; color: var(--color-text-muted); margin: 10px 0 0; }
 
+  .field-row-split { display: flex; align-items: center; gap: 8px; }
+  .field-row-split input { flex: 1; min-width: 0; }
+  .field-row-sep { color: var(--color-text-muted); flex-shrink: 0; }
+
   input[type="number"], input[type="time"], select {
     width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--color-border);
     font-size: 16px; background: var(--color-bg); color: var(--color-text); font-family: inherit;
@@ -320,45 +324,55 @@
 
     <section id="tab-settings" class="tab-panel hidden">
       <section class="settings-card">
-        <h2>Watering Thresholds</h2>
-        <div class="row">
-          <label class="field-label" for="mode-toggle" style="margin:0;">Custom mode</label>
-          <label class="switch">
-            <input type="checkbox" id="mode-toggle" />
-            <span class="switch-slider"></span>
-          </label>
+        <h2>Auto-Watering Conditions</h2>
+        <p class="hint-small">Waters automatically the moment ALL THREE of these are true.</p>
+
+        <label class="field-label" for="temp-min">Temperature between (°C)</label>
+        <div class="field-row-split">
+          <input type="number" id="temp-min" step="0.1" value="18" aria-label="Minimum temperature" />
+          <span class="field-row-sep">–</span>
+          <input type="number" id="temp-max" step="0.1" value="30" aria-label="Maximum temperature" />
         </div>
 
-        <label class="field-label" for="temp-threshold">Water when temperature is at least (°C)</label>
-        <input type="number" id="temp-threshold" step="0.1" value="28" />
+        <label class="field-label" for="hum-min">Humidity between (%)</label>
+        <div class="field-row-split">
+          <input type="number" id="hum-min" step="1" min="0" max="100" value="30" aria-label="Minimum humidity" />
+          <span class="field-row-sep">–</span>
+          <input type="number" id="hum-max" step="1" min="0" max="100" value="70" aria-label="Maximum humidity" />
+        </div>
 
-        <label class="field-label" for="soil-threshold">Water when soil moisture is below (%)</label>
-        <input type="number" id="soil-threshold" step="1" min="0" max="100" value="40" />
+        <label class="field-label" for="soil-threshold">Soil moisture below (%)</label>
+        <input type="number" id="soil-threshold" step="1" min="0" max="100" value="20" />
       </section>
 
       <section class="settings-card">
-        <h2>Pump</h2>
-        <div class="row">
-          <label class="field-label" for="pump-mode-toggle" style="margin:0;">Water until soil is wet</label>
-          <label class="switch">
-            <input type="checkbox" id="pump-mode-toggle" />
-            <span class="switch-slider"></span>
-          </label>
+        <h2>Pump Behavior</h2>
+
+        <label class="field-label" for="pump-mode-select">When watering, stop once:</label>
+        <select id="pump-mode-select">
+          <option value="duration">A fixed time has passed</option>
+          <option value="moisture">Soil reaches a target moisture</option>
+        </select>
+
+        <div id="pump-duration-field">
+          <label class="field-label" for="pump-duration">Run time (seconds)</label>
+          <input type="number" id="pump-duration" step="1" min="1" value="20" />
         </div>
 
-        <label class="field-label" for="soil-wet-target">Stop watering once soil reaches (%)</label>
-        <input type="number" id="soil-wet-target" step="1" min="0" max="100" value="65" disabled />
+        <div id="pump-target-field" class="hidden">
+          <label class="field-label" for="soil-wet-target">Target moisture (%)</label>
+          <input type="number" id="soil-wet-target" step="1" min="0" max="100" value="65" />
+          <p class="hint-small">Always stops after ~20s regardless, even if this target is never reached.</p>
+        </div>
 
-        <label class="field-label" for="pump-duration">Pump run time (seconds)</label>
-        <input type="number" id="pump-duration" step="1" min="1" value="20" />
-
-        <label class="field-label" for="soil-max-percent">Safety stop: cut pump if soil reaches (%)</label>
+        <label class="field-label" for="soil-max-percent">Emergency cutoff — always stop at (%)</label>
         <input type="number" id="soil-max-percent" step="1" min="0" max="100" value="80" />
-        <p class="hint-small">Applies to every watering, manual or automatic, in either mode above — the pump stops immediately once soil hits this %, even mid-run. "Water until soil is wet" also always stops after ~20s as a safety cap, even if its own target is never reached.</p>
+        <p class="hint-small">Applies no matter what's selected above, for every watering (manual or automatic) — the pump stops immediately if soil ever reaches this level.</p>
       </section>
 
       <section class="settings-card">
-        <h2>Watering Schedule</h2>
+        <h2>Extra Scheduled Watering <span style="font-weight:400; color:var(--color-text-muted); font-size:13px;">(optional)</span></h2>
+        <p class="hint-small">Runs in addition to the automatic conditions above — e.g. always water at a set time regardless of sensor readings.</p>
         <div class="row">
           <label class="field-label" for="sched-enabled-toggle" style="margin:0;">Enabled</label>
           <label class="switch">
@@ -422,7 +436,6 @@
   var REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   var HISTORY_LIMIT = 50;
   var SPARK_MAX_POINTS = 20;
-  var PUMP_SAFETY_NET_MS = 22000; // matches firmware's ~20s cap + a small buffer
 
   // ---------- IndexedDB ----------
   var DB_NAME = 'plant-waterer';
@@ -584,11 +597,15 @@
     valPump: document.getElementById('val-pump'),
     valLastWatered: document.getElementById('val-last-watered'),
 
-    modeToggle: document.getElementById('mode-toggle'),
-    tempThreshold: document.getElementById('temp-threshold'),
+    tempMin: document.getElementById('temp-min'),
+    tempMax: document.getElementById('temp-max'),
+    humMin: document.getElementById('hum-min'),
+    humMax: document.getElementById('hum-max'),
     soilThreshold: document.getElementById('soil-threshold'),
 
-    pumpModeToggle: document.getElementById('pump-mode-toggle'),
+    pumpModeSelect: document.getElementById('pump-mode-select'),
+    pumpDurationField: document.getElementById('pump-duration-field'),
+    pumpTargetField: document.getElementById('pump-target-field'),
     soilWetTarget: document.getElementById('soil-wet-target'),
     pumpDuration: document.getElementById('pump-duration'),
     soilMaxPercent: document.getElementById('soil-max-percent'),
@@ -733,7 +750,6 @@
     var text = decodeText(event.target.value);
     if (text !== 'WATERED') return;
 
-    hidePumpProgress();
     if (lastReading) {
       await insertWateringEvent(lastReading).catch(function (err) {
         console.warn('Failed to store watering event', err);
@@ -769,7 +785,7 @@
     ble.historyChar = null;
     lastReading = null;
     lastReadingAt = null;
-    hidePumpProgress();
+    updatePumpUI(false);
     showConnectScreen();
   }
 
@@ -884,24 +900,22 @@
     el.valTemp.textContent = typeof data.temp === 'number' ? data.temp.toFixed(1) + ' °C' : '--';
     el.valHum.textContent = typeof data.hum === 'number' ? data.hum.toFixed(1) + ' %' : '--';
     el.valSoil.textContent = typeof data.soil === 'number' ? data.soil + ' %' : '--';
-    el.valPump.textContent = data.pump ? 'Running' : 'Idle';
-    el.valPump.classList.toggle('pump-on', !!data.pump);
+    updatePumpUI(!!data.pump);
   }
 
-  var pumpProgressTimer = null;
-  function showPumpProgress() {
-    el.pumpProgress.classList.remove('hidden');
-    clearTimeout(pumpProgressTimer);
-    pumpProgressTimer = setTimeout(hidePumpProgress, PUMP_SAFETY_NET_MS);
-  }
-  function hidePumpProgress() {
-    el.pumpProgress.classList.add('hidden');
-    // Keep Water Now disabled for the whole cycle, not just the write() —
-    // otherwise a second tap mid-cycle queues a back-to-back watering, since
-    // a manual trigger intentionally bypasses the cooldown.
-    el.waterBtn.disabled = false;
-    clearTimeout(pumpProgressTimer);
-    pumpProgressTimer = null;
+  // Pump status (card label, progress bar, and the Water Now / Stop Now
+  // button) all track the live "pump" flag from the device directly — the
+  // firmware pushes a sensor notification the instant watering starts or
+  // stops, so this stays accurate without any client-side timers/guessing.
+  function updatePumpUI(pumpOn) {
+    el.valPump.textContent = pumpOn ? 'Running' : 'Idle';
+    el.valPump.classList.toggle('pump-on', pumpOn);
+    el.pumpProgress.classList.toggle('hidden', !pumpOn);
+
+    el.waterBtn.textContent = pumpOn ? 'Stop Now' : 'Water Now';
+    el.waterBtn.dataset.mode = pumpOn ? 'stop' : 'water';
+    el.waterBtn.classList.toggle('danger-btn', pumpOn);
+    el.waterBtn.classList.toggle('accent-btn', !pumpOn);
   }
 
   function renderSparkline(svgEl, values) {
@@ -945,16 +959,17 @@
 
   // ---------- UI: settings ----------
   function renderConfig(config) {
-    el.modeToggle.checked = config.mode === 'custom';
-    if (typeof config.tempThreshold === 'number') el.tempThreshold.value = config.tempThreshold;
+    if (typeof config.tempMin === 'number') el.tempMin.value = config.tempMin;
+    if (typeof config.tempMax === 'number') el.tempMax.value = config.tempMax;
+    if (typeof config.humMin === 'number') el.humMin.value = config.humMin;
+    if (typeof config.humMax === 'number') el.humMax.value = config.humMax;
     if (typeof config.soilThreshold === 'number') el.soilThreshold.value = config.soilThreshold;
-    updateThresholdEditability();
 
-    el.pumpModeToggle.checked = config.pumpMode === 'moisture';
+    el.pumpModeSelect.value = config.pumpMode === 'moisture' ? 'moisture' : 'duration';
     if (typeof config.soilWetTarget === 'number') el.soilWetTarget.value = config.soilWetTarget;
     if (typeof config.pumpDurationMs === 'number') el.pumpDuration.value = Math.round(config.pumpDurationMs / 1000);
     if (typeof config.soilMaxPercent === 'number') el.soilMaxPercent.value = config.soilMaxPercent;
-    updatePumpModeEditability();
+    updatePumpModeFields();
 
     var sched = config.schedule || {};
     el.schedEnabledToggle.checked = !!sched.enabled;
@@ -970,14 +985,10 @@
     updateScheduleEditability();
   }
 
-  function updateThresholdEditability() {
-    var custom = el.modeToggle.checked;
-    el.tempThreshold.disabled = !custom;
-    el.soilThreshold.disabled = !custom;
-  }
-
-  function updatePumpModeEditability() {
-    el.soilWetTarget.disabled = !el.pumpModeToggle.checked;
+  function updatePumpModeFields() {
+    var moisture = el.pumpModeSelect.value === 'moisture';
+    el.pumpDurationField.classList.toggle('hidden', moisture);
+    el.pumpTargetField.classList.toggle('hidden', !moisture);
   }
 
   function updateScheduleModeFields() {
@@ -1106,40 +1117,53 @@
   });
 
   el.waterBtn.addEventListener('click', async function () {
+    var stopping = el.waterBtn.dataset.mode === 'stop';
     el.waterBtn.disabled = true;
-    showPumpProgress();
     try {
-      await writeCommand('WATER_NOW');
+      await writeCommand(stopping ? 'STOP_NOW' : 'WATER_NOW');
     } catch (err) {
-      console.warn('Water now failed', err);
-      hidePumpProgress(); // the command never even reached the device; re-enables the button
+      console.warn((stopping ? 'Stop' : 'Water') + ' now failed', err);
+    } finally {
+      // The button's label/action really tracks live pump state from the next
+      // sensor notification (near-instant — the firmware pushes one right on
+      // start/stop) — just re-enable it here in case that never arrives.
+      el.waterBtn.disabled = false;
     }
   });
 
-  el.modeToggle.addEventListener('change', updateThresholdEditability);
-  el.pumpModeToggle.addEventListener('change', updatePumpModeEditability);
+  el.pumpModeSelect.addEventListener('change', updatePumpModeFields);
   el.schedEnabledToggle.addEventListener('change', updateScheduleEditability);
   el.schedModeSelect.addEventListener('change', updateScheduleModeFields);
 
   el.saveSettingsBtn.addEventListener('click', async function () {
-    var tempThreshold = parseFloat(el.tempThreshold.value);
+    var tempMin = parseFloat(el.tempMin.value);
+    var tempMax = parseFloat(el.tempMax.value);
+    var humMin = parseFloat(el.humMin.value);
+    var humMax = parseFloat(el.humMax.value);
     var soilThreshold = parseInt(el.soilThreshold.value, 10);
     var soilWetTarget = parseInt(el.soilWetTarget.value, 10);
     var pumpDurationSec = parseInt(el.pumpDuration.value, 10);
     var soilMaxPercent = parseInt(el.soilMaxPercent.value, 10);
     var intervalHours = parseInt(el.schedIntervalHours.value, 10);
 
-    if ([tempThreshold, soilThreshold, soilWetTarget, pumpDurationSec, soilMaxPercent, intervalHours].some(function (n) { return Number.isNaN(n); })) {
+    var allValues = [tempMin, tempMax, humMin, humMax, soilThreshold, soilWetTarget, pumpDurationSec, soilMaxPercent, intervalHours];
+    if (allValues.some(function (n) { return Number.isNaN(n); })) {
       setSettingsStatus('Enter valid numbers before saving.');
+      return;
+    }
+    if (tempMin > tempMax || humMin > humMax) {
+      setSettingsStatus('Min must not be greater than max.');
       return;
     }
 
     var timeParts = (el.schedTime.value || '05:00').split(':');
     var config = {
-      mode: el.modeToggle.checked ? 'custom' : 'default',
-      tempThreshold: tempThreshold,
+      tempMin: tempMin,
+      tempMax: tempMax,
+      humMin: humMin,
+      humMax: humMax,
       soilThreshold: soilThreshold,
-      pumpMode: el.pumpModeToggle.checked ? 'moisture' : 'duration',
+      pumpMode: el.pumpModeSelect.value,
       soilWetTarget: soilWetTarget,
       pumpDurationMs: pumpDurationSec * 1000,
       soilMaxPercent: soilMaxPercent,
@@ -1178,8 +1202,7 @@
     el.connectBtn.disabled = true;
     el.connectBtn.textContent = 'Web Bluetooth not available';
   }
-  updateThresholdEditability();
-  updatePumpModeEditability();
+  updatePumpModeFields();
   updateScheduleEditability();
   renderDayToggles();
   showConnectScreen();
