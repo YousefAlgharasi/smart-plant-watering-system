@@ -526,8 +526,12 @@
   // don't already have, deduping by timestamp since the device may still be
   // holding events we already stored live via the EVENT characteristic.
   async function syncHistoryFromDevice() {
-    if (!ble.historyChar) return;
+    if (!ble.historyChar) {
+      console.warn('No HISTORY characteristic on this device — firmware needs a fresh upload.');
+      return;
+    }
     var text = decodeText(await ble.historyChar.readValue());
+    console.log('[history] raw payload from device:', text);
     var events;
     try {
       events = JSON.parse(text);
@@ -535,7 +539,10 @@
       console.warn('Malformed history payload', text);
       return;
     }
-    if (!Array.isArray(events) || events.length === 0) return;
+    if (!Array.isArray(events) || events.length === 0) {
+      console.log('[history] device reports no watering events logged yet.');
+      return;
+    }
 
     var existing = await getWateringHistory(HISTORY_LIMIT);
     var existingTimes = existing.map(function (r) { return r.timestamp; });
