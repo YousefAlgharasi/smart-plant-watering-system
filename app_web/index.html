@@ -343,6 +343,10 @@
 
         <label class="field-label" for="soil-threshold">Soil moisture below (%)</label>
         <input type="number" id="soil-threshold" step="1" min="0" max="100" value="20" />
+
+        <label class="field-label" for="water-cooldown">Cooldown between auto-waterings (seconds)</label>
+        <input type="number" id="water-cooldown" step="1" min="0" value="0" />
+        <p class="hint-small">0 = water again immediately whenever the conditions above are still met (good for demos). Raise this for real-world use so it doesn't re-trigger back-to-back. Manual "Water Now" always ignores this.</p>
       </section>
 
       <section class="settings-card">
@@ -609,6 +613,7 @@
     humMin: document.getElementById('hum-min'),
     humMax: document.getElementById('hum-max'),
     soilThreshold: document.getElementById('soil-threshold'),
+    waterCooldown: document.getElementById('water-cooldown'),
 
     pumpModeSelect: document.getElementById('pump-mode-select'),
     pumpDurationField: document.getElementById('pump-duration-field'),
@@ -971,6 +976,7 @@
     if (typeof config.humMin === 'number') el.humMin.value = config.humMin;
     if (typeof config.humMax === 'number') el.humMax.value = config.humMax;
     if (typeof config.soilThreshold === 'number') el.soilThreshold.value = config.soilThreshold;
+    if (typeof config.cooldownMs === 'number') el.waterCooldown.value = Math.round(config.cooldownMs / 1000);
 
     el.pumpModeSelect.value = config.pumpMode === 'moisture' ? 'moisture' : 'duration';
     if (typeof config.soilWetTarget === 'number') el.soilWetTarget.value = config.soilWetTarget;
@@ -1151,9 +1157,10 @@
     var soilWetTarget = parseInt(el.soilWetTarget.value, 10);
     var pumpDurationSec = parseInt(el.pumpDuration.value, 10);
     var soilMaxPercent = parseInt(el.soilMaxPercent.value, 10);
+    var cooldownSec = parseInt(el.waterCooldown.value, 10);
     var intervalHours = parseInt(el.schedIntervalHours.value, 10);
 
-    var allValues = [tempMin, tempMax, humMin, humMax, soilThreshold, soilWetTarget, pumpDurationSec, soilMaxPercent, intervalHours];
+    var allValues = [tempMin, tempMax, humMin, humMax, soilThreshold, soilWetTarget, pumpDurationSec, soilMaxPercent, cooldownSec, intervalHours];
     if (allValues.some(function (n) { return Number.isNaN(n); })) {
       setSettingsStatus('Enter valid numbers before saving.');
       return;
@@ -1174,6 +1181,7 @@
       soilWetTarget: soilWetTarget,
       pumpDurationMs: pumpDurationSec * 1000,
       soilMaxPercent: soilMaxPercent,
+      cooldownMs: cooldownSec * 1000,
       schedule: {
         enabled: el.schedEnabledToggle.checked,
         mode: el.schedModeSelect.value,
