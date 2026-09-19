@@ -278,6 +278,14 @@
       <p id="connect-status" class="status-text" aria-live="polite"></p>
     </div>
     <p class="browser-note">Web Bluetooth works in Chrome or Edge only (desktop or Android) — Safari and Firefox aren't supported.</p>
+
+    <div class="connect-card">
+      <p class="hint">Already on the same WiFi network as the device? Connect directly — no Bluetooth range needed.</p>
+      <label class="field-label" for="wifi-host" style="margin-top:0;">Device address</label>
+      <input type="text" id="wifi-host" value="plantwaterer.local" autocapitalize="none" autocorrect="off" spellcheck="false" />
+      <button type="button" id="connect-wifi-btn" class="accent-btn" style="margin-top:12px;">Connect via WiFi</button>
+      <p id="wifi-connect-status" class="status-text" aria-live="polite"></p>
+    </div>
   </section>
 
   <section id="dashboard-screen" class="screen hidden">
@@ -471,6 +479,8 @@
   var REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   var HISTORY_LIMIT = 50;
   var SPARK_MAX_POINTS = 20;
+  var WIFI_SENSOR_POLL_MS = 1500;
+  var WIFI_LOG_POLL_MS = 1000;
 
   // ---------- IndexedDB ----------
   var DB_NAME = 'plant-waterer';
@@ -561,11 +571,17 @@
   // don't already have, deduping by timestamp since the device may still be
   // holding events we already stored live via the EVENT characteristic.
   async function syncHistoryFromDevice() {
-    if (!ble.historyChar) {
-      console.warn('No HISTORY characteristic on this device — firmware needs a fresh upload.');
-      return;
+    var text;
+    if (usingWifi) {
+      var res = await fetch(wifiBaseUrl + '/api/history');
+      text = await res.text();
+    } else {
+      if (!ble.historyChar) {
+        console.warn('No HISTORY characteristic on this device — firmware needs a fresh upload.');
+        return;
+      }
+      text = decodeText(await ble.historyChar.readValue());
     }
-    var text = decodeText(await ble.historyChar.readValue());
     console.log('[history] raw payload from device:', text);
     var events;
     try {
@@ -612,6 +628,9 @@
     dashboardScreen: document.getElementById('dashboard-screen'),
     connectBtn: document.getElementById('connect-btn'),
     connectStatus: document.getElementById('connect-status'),
+    wifiHost: document.getElementById('wifi-host'),
+    connectWifiBtn: document.getElementById('connect-wifi-btn'),
+    wifiConnectStatus: document.getElementById('wifi-connect-status'),
     connInfo: document.getElementById('conn-info'),
     deviceLabel: document.getElementById('device-label'),
     disconnectBtn: document.getElementById('disconnect-btn'),
@@ -690,6 +709,15 @@
   var tickTimer = null;
   var scheduleDays = [true, true, true, true, true, true, true]; // index 0 = Sunday
 
+  // ---------- WiFi state (alternative to BLE — same-network access, no
+  // Bluetooth range limit) ----------
+  var usingWifi = false;
+  var wifiBaseUrl = '';
+  var wifiSensorTimer = null;
+  var wifiLogTimer = null;
+  var wifiLastLogSeq = 0;
+  var wifiLastPumpState = false;
+
   function isWebBluetoothSupported() {
     return 'bluetooth' in navigator;
   }
@@ -712,12 +740,20 @@
   }
 
   function syncTime() {
+    if (usingWifi) {
+      return fetch(wifiBaseUrl + '/api/time', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: String(localEpochSeconds()),
+      }).catch(function (err) { console.warn('Time sync failed', err); });
+    }
     if (!ble.timeChar) return Promise.resolve();
     return ble.timeChar.writeValue(new TextEncoder().encode(String(localEpochSeconds())))
       .catch(function (err) { console.warn('Time sync failed', err); });
   }
 
   async function connect() {
+    usingWifi = false;
     var device = await navigator.bluetooth.requestDevice({
       filters: [{ services: [SERVICE_UUID] }],
     });
@@ -797,6 +833,12 @@
       console.warn('Malformed sensor payload', text);
       return;
     }
+    applySensorReading(data);
+  }
+
+  // Shared by the BLE notification handler and the WiFi polling loop below,
+  // so both transports render/store readings identically.
+  function applySensorReading(data) {
     lastReading = data;
     lastReadingAt = Date.now();
     renderReading(data);
@@ -804,6 +846,101 @@
     insertReading(data)
       .then(refreshSparklines)
       .catch(function (err) { console.warn('Failed to store reading', err); });
+  }
+
+  // ---------- WiFi transport (polling — HTTP has no push notifications) ----------
+  async function wifiFetchJson(path, options) {
+    var res = await fetch(wifiBaseUrl + path, options);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  }
+
+  // BLE gets a dedicated "WATERED" event the instant a watering finishes; over
+  // WiFi there's no push channel, so infer the same moment from the polled
+  // pump flag flipping true -> false between reads.
+  function checkWifiWateringComplete(data) {
+    var pumpNow = !!data.pump;
+    if (wifiLastPumpState && !pumpNow) {
+      insertWateringEvent(data).then(refreshHistory).catch(function (err) {
+        console.warn('Failed to store watering event', err);
+      });
+      showToast('🌱 Plant watered!');
+    }
+    wifiLastPumpState = pumpNow;
+  }
+
+  function startWifiSensorPolling() {
+    stopWifiSensorPolling();
+    wifiSensorTimer = setInterval(function () {
+      wifiFetchJson('/api/sensor').then(function (data) {
+        applySensorReading(data);
+        checkWifiWateringComplete(data);
+      }).catch(function (err) { console.warn('WiFi sensor poll failed', err); });
+    }, WIFI_SENSOR_POLL_MS);
+  }
+
+  function stopWifiSensorPolling() {
+    if (wifiSensorTimer) {
+      clearInterval(wifiSensorTimer);
+      wifiSensorTimer = null;
+    }
+  }
+
+  function startWifiLogPolling() {
+    stopWifiLogPolling();
+    wifiLogTimer = setInterval(function () {
+      wifiFetchJson('/api/log?since=' + wifiLastLogSeq).then(function (entries) {
+        entries.forEach(function (e) {
+          appendConsoleLine(e.text);
+          if (e.seq > wifiLastLogSeq) wifiLastLogSeq = e.seq;
+        });
+      }).catch(function (err) { console.warn('WiFi log poll failed', err); });
+    }, WIFI_LOG_POLL_MS);
+  }
+
+  function stopWifiLogPolling() {
+    if (wifiLogTimer) {
+      clearInterval(wifiLogTimer);
+      wifiLogTimer = null;
+    }
+  }
+
+  async function connectWifi(host) {
+    host = (host || '').trim();
+    if (!host) throw new Error('Enter a device address first.');
+
+    wifiBaseUrl = 'http://' + host;
+    var config = await wifiFetchJson('/api/config'); // throws if unreachable — caller shows the error
+
+    usingWifi = true;
+    wifiLastLogSeq = 0;
+    wifiLastPumpState = false;
+
+    renderConfig(config);
+    saveCachedConfig(config);
+
+    try {
+      await syncHistoryFromDevice();
+    } catch (err) {
+      console.warn('Could not sync watering history', err);
+    }
+
+    // Prime the pump-state baseline before polling starts checking for
+    // start->stop transitions, so a watering already in progress at connect
+    // time isn't misread as "just finished" on the first poll.
+    try {
+      var initial = await wifiFetchJson('/api/sensor');
+      applySensorReading(initial);
+      wifiLastPumpState = !!initial.pump;
+    } catch (err) {
+      console.warn('Initial WiFi sensor read failed', err);
+    }
+
+    await syncTime();
+    onConnected(host);
+
+    startWifiSensorPolling();
+    startWifiLogPolling();
   }
 
   async function handleEventNotification(event) {
@@ -888,6 +1025,8 @@
   function onDisconnected() {
     stopAutoRefresh();
     stopTicker();
+    stopWifiSensorPolling();
+    stopWifiLogPolling();
     ble.device = null;
     ble.sensorChar = null;
     ble.eventChar = null;
@@ -896,6 +1035,8 @@
     ble.timeChar = null;
     ble.historyChar = null;
     ble.logChar = null;
+    usingWifi = false;
+    wifiBaseUrl = '';
     lastReading = null;
     lastReadingAt = null;
     updatePumpUI(false);
@@ -911,11 +1052,27 @@
   }
 
   async function writeCommand(cmd) {
+    if (usingWifi) {
+      await fetch(wifiBaseUrl + '/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: cmd,
+      });
+      return;
+    }
     if (!ble.commandChar) return;
     await ble.commandChar.writeValue(new TextEncoder().encode(cmd));
   }
 
   async function writeConfig(config) {
+    if (usingWifi) {
+      await fetch(wifiBaseUrl + '/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      });
+      return;
+    }
     if (!ble.configChar) return;
     await ble.configChar.writeValue(new TextEncoder().encode(JSON.stringify(config)));
   }
@@ -969,6 +1126,8 @@
     el.connectScreen.classList.remove('hidden');
     el.connectBtn.disabled = false;
     el.connectBtn.textContent = 'Connect to PlantWaterer';
+    el.connectWifiBtn.disabled = false;
+    el.wifiConnectStatus.textContent = '';
   }
 
   function onConnected(deviceLabel) {
@@ -1215,6 +1374,19 @@
     }
   });
 
+  el.connectWifiBtn.addEventListener('click', async function () {
+    el.connectWifiBtn.disabled = true;
+    el.wifiConnectStatus.textContent = 'Connecting…';
+    try {
+      await connectWifi(el.wifiHost.value);
+    } catch (err) {
+      console.warn('WiFi connection failed', err);
+      el.wifiConnectStatus.textContent = 'Could not reach the device — check the address and that it\'s on the same network.';
+    } finally {
+      el.connectWifiBtn.disabled = false;
+    }
+  });
+
   el.disconnectBtn.addEventListener('click', disconnect);
 
   el.refreshBtn.addEventListener('click', async function () {
@@ -1313,6 +1485,15 @@
     try {
       setSettingsStatus('Resetting…');
       await writeCommand('RESET_DEFAULTS');
+      // Over BLE, the device pushes a CONFIG notify after resetting and
+      // handleConfigNotification re-renders the fields automatically. WiFi
+      // has no push channel, so fetch the new values back explicitly.
+      if (usingWifi) {
+        var config = await wifiFetchJson('/api/config');
+        renderConfig(config);
+        saveCachedConfig(config);
+        setSettingsStatus('Settings reset.');
+      }
     } catch (err) {
       console.warn('Reset failed', err);
       setSettingsStatus('Reset failed — check the connection.');
