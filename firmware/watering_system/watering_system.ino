@@ -47,7 +47,6 @@ const unsigned long CHECK_INTERVAL_MS     = 10000;   // how often to read sensor
 const unsigned long PUMP_SAFETY_MAX_MS    = 20000;   // hard cap for moisture-feedback mode, no matter what
 const unsigned long PUMP_PULSE_MS         = 1500;    // moisture mode: burst length between checks
 const unsigned long PUMP_SETTLE_MS        = 800;     // moisture mode: pause after a burst so the reading reflects reality
-const unsigned long MIN_WATER_INTERVAL_MS = 600000;  // 10 min cooldown between AUTO waterings (schedule counts as auto)
 
 // ---------- Defaults ----------
 // Auto-watering fires only when ALL THREE are true: temp in [MIN,MAX], humidity
@@ -60,6 +59,10 @@ const int   DEFAULT_SOIL_THRESHOLD  = 20;   // water only if moisture % is below
 const int   DEFAULT_SOIL_WET_TARGET = 65;   // moisture-mode pump target: stop once soil reaches this %
 const unsigned long DEFAULT_PUMP_DURATION_MS = 20000; // fixed-duration pump mode run length
 const int   DEFAULT_SOIL_MAX_PERCENT = 80;  // universal safety cap: stop ANY watering immediately at this %
+// 0 by default (no cooldown) so auto-watering is instantly visible for demos;
+// set higher in Settings to space out real-world AUTO waterings (manual
+// "Water Now" always bypasses this regardless of its value).
+const unsigned long DEFAULT_MIN_WATER_INTERVAL_MS = 0;
 
 DHT dht(DHTPIN, DHTTYPE);
 Preferences prefs;
@@ -95,6 +98,7 @@ String pumpMode = "duration"; // "duration" (fixed burst) or "moisture" (until s
 int soilWetTarget = DEFAULT_SOIL_WET_TARGET;
 unsigned long pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
 int soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT; // stop any watering immediately once soil hits this %
+unsigned long minWaterIntervalMs = DEFAULT_MIN_WATER_INTERVAL_MS; // cooldown between AUTO waterings (manual bypasses it)
 
 // ---------- Schedule ----------
 bool schedEnabled = true;
@@ -116,12 +120,10 @@ unsigned long timeSyncMillis = 0;
 bool timeSynced = false;
 
 unsigned long lastCheck = 0;
-// Sentinel for "never watered yet": deliberately wraps below 0 so that on
-// boot, millis() - lastWaterMillis is already >= MIN_WATER_INTERVAL_MS. A
-// plain 0 here would make a fresh boot look like "watered at time zero",
-// silently blocking auto-watering for the first 10 minutes after every
-// power-on/reset even when every condition is already met.
-unsigned long lastWaterMillis = 0 - MIN_WATER_INTERVAL_MS;
+// "Never watered yet" sentinel — set properly in setup() once minWaterIntervalMs
+// is loaded (see the comment there). Left as 0 here since the real value
+// depends on a config value we haven't read yet at global-init time.
+unsigned long lastWaterMillis = 0;
 
 float lastTemp = NAN;
 float lastHum = NAN;
@@ -162,6 +164,7 @@ void loadConfig() {
   soilWetTarget = prefs.getInt("wetTarget", DEFAULT_SOIL_WET_TARGET);
   pumpDurationMs = prefs.getULong("pumpDurMs", DEFAULT_PUMP_DURATION_MS);
   soilMaxPercent = prefs.getInt("soilMax", DEFAULT_SOIL_MAX_PERCENT);
+  minWaterIntervalMs = prefs.getULong("cooldownMs", DEFAULT_MIN_WATER_INTERVAL_MS);
   schedEnabled = prefs.getBool("schedOn", true);
   schedMode = prefs.getString("schedMode", "daily");
   schedHour = prefs.getInt("schedHour", 5);
@@ -182,6 +185,7 @@ void saveConfig() {
   prefs.putInt("wetTarget", soilWetTarget);
   prefs.putULong("pumpDurMs", pumpDurationMs);
   prefs.putInt("soilMax", soilMaxPercent);
+  prefs.putULong("cooldownMs", minWaterIntervalMs);
   prefs.putBool("schedOn", schedEnabled);
   prefs.putString("schedMode", schedMode);
   prefs.putInt("schedHour", schedHour);
@@ -263,6 +267,7 @@ void pushConfig() {
   doc["soilWetTarget"] = soilWetTarget;
   doc["pumpDurationMs"] = pumpDurationMs;
   doc["soilMaxPercent"] = soilMaxPercent;
+  doc["cooldownMs"] = minWaterIntervalMs;
 
   JsonObject sched = doc.createNestedObject("schedule");
   sched["enabled"] = schedEnabled;
@@ -289,6 +294,7 @@ void resetToDefaults() {
   soilWetTarget = DEFAULT_SOIL_WET_TARGET;
   pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
   soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT;
+  minWaterIntervalMs = DEFAULT_MIN_WATER_INTERVAL_MS;
   schedEnabled = true;
   schedMode = "daily";
   schedHour = 5;
@@ -325,6 +331,7 @@ class ConfigCallbacks : public NimBLECharacteristicCallbacks {
       if (doc.containsKey("soilWetTarget")) soilWetTarget = doc["soilWetTarget"];
       if (doc.containsKey("pumpDurationMs")) pumpDurationMs = doc["pumpDurationMs"];
       if (doc.containsKey("soilMaxPercent")) soilMaxPercent = doc["soilMaxPercent"];
+      if (doc.containsKey("cooldownMs")) minWaterIntervalMs = doc["cooldownMs"];
 
       if (doc.containsKey("schedule")) {
         JsonObject sched = doc["schedule"];
@@ -414,9 +421,9 @@ void startWatering(bool manual) {
                           // trigger during an existing run is just a no-op
 
   unsigned long now = millis();
-  if (!manual && (now - lastWaterMillis < MIN_WATER_INTERVAL_MS)) {
+  if (!manual && (now - lastWaterMillis < minWaterIntervalMs)) {
     Serial.print("[auto-water] blocked by cooldown, ms remaining=");
-    Serial.println(MIN_WATER_INTERVAL_MS - (now - lastWaterMillis));
+    Serial.println(minWaterIntervalMs - (now - lastWaterMillis));
     return; // auto watering (condition or schedule) is on cooldown, ignore for now
   }
 
@@ -591,6 +598,14 @@ void setup() {
   loadConfig();
   loadHistory();
 
+  // "Never watered yet" sentinel: deliberately wraps below 0 so that on
+  // boot, millis() - lastWaterMillis is already >= minWaterIntervalMs. A
+  // plain 0 here would make a fresh boot look like "watered at time zero",
+  // silently blocking auto-watering until the cooldown elapses even when
+  // every condition is already met. Computed here (not as a global
+  // initializer) since it depends on the cooldown loaded from config.
+  lastWaterMillis = 0 - minWaterIntervalMs;
+
   // Version marker + current config dump — if you don't see this exact line
   // (or the values look wrong) after uploading, the ESP32 is still running
   // an older sketch and needs a fresh upload.
@@ -602,6 +617,7 @@ void setup() {
   Serial.print(" soilThreshold="); Serial.print(soilThreshold);
   Serial.print(" pumpMode="); Serial.print(pumpMode);
   Serial.print(" soilMaxPercent="); Serial.print(soilMaxPercent);
+  Serial.print(" minWaterIntervalMs="); Serial.print(minWaterIntervalMs);
   Serial.print(" historyCount="); Serial.println(historyCount);
 
   NimBLEDevice::init(DEVICE_NAME);
