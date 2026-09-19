@@ -34,7 +34,13 @@
 #define CONFIG_CHAR_UUID  "12345678-1234-5678-1234-56789abc0003"
 #define COMMAND_CHAR_UUID "12345678-1234-5678-1234-56789abc0004"
 #define TIME_CHAR_UUID    "12345678-1234-5678-1234-56789abc0005"
+#define HISTORY_CHAR_UUID "12345678-1234-5678-1234-56789abc0006"
 #define DEVICE_NAME       "PlantWaterer"
+
+// On-device watering log so the app can catch up on events that happened
+// while it wasn't connected (auto-watering runs with no phone/browser
+// attached at all). Ring buffer, persisted to flash after every watering.
+#define HISTORY_CAPACITY 10
 
 // ---------- Timing ----------
 const unsigned long CHECK_INTERVAL_MS     = 10000;   // how often to read sensors
@@ -48,6 +54,7 @@ const float DEFAULT_TEMP_THRESHOLD  = 28.0; // water only if temp >= this (it's 
 const int   DEFAULT_SOIL_THRESHOLD  = 40;   // water only if moisture % is below this (it's dry)
 const int   DEFAULT_SOIL_WET_TARGET = 65;   // moisture-mode pump target: stop once soil reaches this %
 const unsigned long DEFAULT_PUMP_DURATION_MS = 20000; // fixed-duration pump mode run length
+const int   DEFAULT_SOIL_MAX_PERCENT = 80;  // universal safety cap: stop ANY watering immediately at this %
 
 DHT dht(DHTPIN, DHTTYPE);
 Preferences prefs;
@@ -58,8 +65,20 @@ NimBLECharacteristic *eventChar;
 NimBLECharacteristic *configChar;
 NimBLECharacteristic *commandChar;
 NimBLECharacteristic *timeChar;
+NimBLECharacteristic *historyChar;
 
 bool deviceConnected = false;
+
+// ---------- Watering history (ring buffer, persisted) ----------
+struct WateringLogEntry {
+  uint32_t epoch; // 0 means "time unknown" (device hadn't been time-synced yet)
+  float temp;
+  float hum;
+  int16_t soil;
+};
+WateringLogEntry history[HISTORY_CAPACITY];
+uint8_t historyCount = 0;
+uint8_t historyHead = 0; // index the NEXT entry will be written to
 
 String mode = "default";     // "default" or "custom" (temp/soil thresholds)
 float tempThreshold = DEFAULT_TEMP_THRESHOLD;
@@ -68,6 +87,7 @@ int soilThreshold = DEFAULT_SOIL_THRESHOLD;
 String pumpMode = "duration"; // "duration" (fixed burst) or "moisture" (until soil is wet)
 int soilWetTarget = DEFAULT_SOIL_WET_TARGET;
 unsigned long pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
+int soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT; // stop any watering immediately once soil hits this %
 
 // ---------- Schedule ----------
 bool schedEnabled = true;
@@ -113,6 +133,7 @@ void loadConfig() {
   pumpMode = prefs.getString("pumpMode", "duration");
   soilWetTarget = prefs.getInt("wetTarget", DEFAULT_SOIL_WET_TARGET);
   pumpDurationMs = prefs.getULong("pumpDurMs", DEFAULT_PUMP_DURATION_MS);
+  soilMaxPercent = prefs.getInt("soilMax", DEFAULT_SOIL_MAX_PERCENT);
   schedEnabled = prefs.getBool("schedOn", true);
   schedMode = prefs.getString("schedMode", "daily");
   schedHour = prefs.getInt("schedHour", 5);
@@ -130,6 +151,7 @@ void saveConfig() {
   prefs.putString("pumpMode", pumpMode);
   prefs.putInt("wetTarget", soilWetTarget);
   prefs.putULong("pumpDurMs", pumpDurationMs);
+  prefs.putInt("soilMax", soilMaxPercent);
   prefs.putBool("schedOn", schedEnabled);
   prefs.putString("schedMode", schedMode);
   prefs.putInt("schedHour", schedHour);
@@ -137,6 +159,62 @@ void saveConfig() {
   prefs.putInt("schedIntH", schedIntervalHours);
   prefs.putUChar("schedDays", schedDaysMask);
   prefs.end();
+}
+
+// ---------- History persistence ----------
+void loadHistory() {
+  prefs.begin("watering", true);
+  size_t len = prefs.getBytesLength("histBuf");
+  if (len == sizeof(history)) {
+    prefs.getBytes("histBuf", history, sizeof(history));
+    historyHead = prefs.getUChar("histHead", 0);
+    historyCount = prefs.getUChar("histCount", 0);
+  }
+  prefs.end();
+}
+
+void saveHistory() {
+  prefs.begin("watering", false);
+  prefs.putBytes("histBuf", history, sizeof(history));
+  prefs.putUChar("histHead", historyHead);
+  prefs.putUChar("histCount", historyCount);
+  prefs.end();
+}
+
+void updateHistoryChar() {
+  // Oldest-first. When the buffer is full, historyHead already points at the
+  // oldest surviving entry (the next slot to be overwritten); otherwise the
+  // oldest entry is always at index 0.
+  int oldestIndex = (historyCount < HISTORY_CAPACITY) ? 0 : historyHead;
+
+  StaticJsonDocument<1024> doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (int i = 0; i < historyCount; i++) {
+    int idx = (oldestIndex + i) % HISTORY_CAPACITY;
+    JsonObject o = arr.createNestedObject();
+    o["t"] = history[idx].epoch;
+    o["temp"] = history[idx].temp;
+    o["hum"] = history[idx].hum;
+    o["soil"] = history[idx].soil;
+  }
+
+  String out;
+  serializeJson(doc, out);
+  historyChar->setValue(out.c_str());
+}
+
+void recordWateringEvent(int soilAfter) {
+  WateringLogEntry &entry = history[historyHead];
+  entry.epoch = timeSynced ? (uint32_t)currentLocalEpoch() : 0;
+  entry.temp = lastTemp;
+  entry.hum = lastHum;
+  entry.soil = soilAfter;
+
+  historyHead = (historyHead + 1) % HISTORY_CAPACITY;
+  if (historyCount < HISTORY_CAPACITY) historyCount++;
+
+  saveHistory();
+  updateHistoryChar();
 }
 
 void pushConfig() {
@@ -147,6 +225,7 @@ void pushConfig() {
   doc["pumpMode"] = pumpMode;
   doc["soilWetTarget"] = soilWetTarget;
   doc["pumpDurationMs"] = pumpDurationMs;
+  doc["soilMaxPercent"] = soilMaxPercent;
 
   JsonObject sched = doc.createNestedObject("schedule");
   sched["enabled"] = schedEnabled;
@@ -170,6 +249,7 @@ void resetToDefaults() {
   pumpMode = "duration";
   soilWetTarget = DEFAULT_SOIL_WET_TARGET;
   pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
+  soilMaxPercent = DEFAULT_SOIL_MAX_PERCENT;
   schedEnabled = true;
   schedMode = "daily";
   schedHour = 5;
@@ -203,6 +283,7 @@ class ConfigCallbacks : public NimBLECharacteristicCallbacks {
       if (doc.containsKey("pumpMode")) pumpMode = doc["pumpMode"].as<String>();
       if (doc.containsKey("soilWetTarget")) soilWetTarget = doc["soilWetTarget"];
       if (doc.containsKey("pumpDurationMs")) pumpDurationMs = doc["pumpDurationMs"];
+      if (doc.containsKey("soilMaxPercent")) soilMaxPercent = doc["soilMaxPercent"];
 
       if (doc.containsKey("schedule")) {
         JsonObject sched = doc["schedule"];
@@ -293,34 +374,45 @@ void waterPlant(bool manual) {
 
   pumpOn = true;
   unsigned long startMillis = millis();
+  // "duration" mode runs up to the configured length; "moisture" mode runs up
+  // to the hard safety cap instead, since its whole point is to keep going
+  // until the target is reached (or the cap saves it from a bad sensor/empty
+  // reservoir).
+  unsigned long maxRunMs = (pumpMode == "moisture") ? PUMP_SAFETY_MAX_MS : pumpDurationMs;
+  int soilAfter = -1;
 
-  if (pumpMode == "moisture") {
-    // Pulse the pump and re-check moisture between bursts (rather than one
-    // continuous run) so the reading reflects water that's actually reached
-    // the sensor. A hard cap always applies, regardless of target, in case
-    // the sensor misreads or the reservoir runs low.
-    while (true) {
-      unsigned long elapsed = millis() - startMillis;
-      if (elapsed >= PUMP_SAFETY_MAX_MS) break;
+  // Pulse the pump and re-check moisture between bursts (rather than one
+  // continuous run) so the reading reflects water that's actually reached
+  // the sensor. Whatever the mode, soilMaxPercent is a universal cutoff:
+  // watering always stops immediately once soil is at/above it, even if
+  // there's time (or moisture-target headroom) left.
+  while (true) {
+    unsigned long elapsed = millis() - startMillis;
+    if (elapsed >= maxRunMs) break;
 
-      unsigned long remaining = PUMP_SAFETY_MAX_MS - elapsed;
-      unsigned long pulse = (PUMP_PULSE_MS < remaining) ? PUMP_PULSE_MS : remaining;
+    unsigned long remaining = maxRunMs - elapsed;
+    unsigned long pulse = (PUMP_PULSE_MS < remaining) ? PUMP_PULSE_MS : remaining;
 
-      digitalWrite(RELAY_PIN, HIGH); // adjust to LOW if your relay is active-low
-      delay(pulse);
-      digitalWrite(RELAY_PIN, LOW);
-
-      delay(PUMP_SETTLE_MS);
-      if (readMoisturePercent() >= soilWetTarget) break;
-    }
-  } else {
     digitalWrite(RELAY_PIN, HIGH); // adjust to LOW if your relay is active-low
-    delay(pumpDurationMs);
+    delay(pulse);
     digitalWrite(RELAY_PIN, LOW);
+
+    soilAfter = readMoisturePercent();
+    if (soilAfter >= soilMaxPercent) break;
+    if (pumpMode == "moisture" && soilAfter >= soilWetTarget) break;
+
+    elapsed = millis() - startMillis;
+    if (elapsed >= maxRunMs) break;
+    remaining = maxRunMs - elapsed;
+    unsigned long settle = (PUMP_SETTLE_MS < remaining) ? PUMP_SETTLE_MS : remaining;
+    delay(settle);
   }
 
   pumpOn = false;
   lastWaterMillis = now;
+
+  if (soilAfter < 0) soilAfter = readMoisturePercent();
+  recordWateringEvent(soilAfter);
 
   if (deviceConnected) {
     eventChar->setValue("WATERED");
@@ -392,6 +484,7 @@ void setup() {
   dht.begin();
 
   loadConfig();
+  loadHistory();
 
   NimBLEDevice::init(DEVICE_NAME);
   pServer = NimBLEDevice::createServer();
@@ -429,8 +522,14 @@ void setup() {
   );
   timeChar->setCallbacks(new TimeCallbacks());
 
+  historyChar = service->createCharacteristic(
+    HISTORY_CHAR_UUID,
+    NIMBLE_PROPERTY::READ
+  );
+
   service->start();
   pushConfig();
+  updateHistoryChar(); // so a fresh connection can read persisted history right away
 
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(SERVICE_UUID);
