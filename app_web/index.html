@@ -348,6 +348,9 @@
 
         <label class="field-label" for="soil-wet-target">Stop watering once soil reaches (%)</label>
         <input type="number" id="soil-wet-target" step="1" min="0" max="100" value="65" disabled />
+
+        <label class="field-label" for="pump-duration">Pump run time (seconds)</label>
+        <input type="number" id="pump-duration" step="1" min="1" value="20" />
         <p class="hint-small">Either way, the pump always stops after ~20s as a safety cap, even if the target's never reached.</p>
       </section>
 
@@ -540,6 +543,7 @@
 
     pumpModeToggle: document.getElementById('pump-mode-toggle'),
     soilWetTarget: document.getElementById('soil-wet-target'),
+    pumpDuration: document.getElementById('pump-duration'),
 
     schedEnabledToggle: document.getElementById('sched-enabled-toggle'),
     schedModeSelect: document.getElementById('sched-mode-select'),
@@ -888,6 +892,7 @@
 
     el.pumpModeToggle.checked = config.pumpMode === 'moisture';
     if (typeof config.soilWetTarget === 'number') el.soilWetTarget.value = config.soilWetTarget;
+    if (typeof config.pumpDurationMs === 'number') el.pumpDuration.value = Math.round(config.pumpDurationMs / 1000);
     updatePumpModeEditability();
 
     var sched = config.schedule || {};
@@ -1059,9 +1064,10 @@
     var tempThreshold = parseFloat(el.tempThreshold.value);
     var soilThreshold = parseInt(el.soilThreshold.value, 10);
     var soilWetTarget = parseInt(el.soilWetTarget.value, 10);
+    var pumpDurationSec = parseInt(el.pumpDuration.value, 10);
     var intervalHours = parseInt(el.schedIntervalHours.value, 10);
 
-    if ([tempThreshold, soilThreshold, soilWetTarget, intervalHours].some(function (n) { return Number.isNaN(n); })) {
+    if ([tempThreshold, soilThreshold, soilWetTarget, pumpDurationSec, intervalHours].some(function (n) { return Number.isNaN(n); })) {
       setSettingsStatus('Enter valid numbers before saving.');
       return;
     }
@@ -1073,6 +1079,7 @@
       soilThreshold: soilThreshold,
       pumpMode: el.pumpModeToggle.checked ? 'moisture' : 'duration',
       soilWetTarget: soilWetTarget,
+      pumpDurationMs: pumpDurationSec * 1000,
       schedule: {
         enabled: el.schedEnabledToggle.checked,
         mode: el.schedModeSelect.value,

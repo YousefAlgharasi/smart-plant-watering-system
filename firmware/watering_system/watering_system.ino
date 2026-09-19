@@ -12,9 +12,20 @@
 #define SOIL_PIN 34
 #define RELAY_PIN 27
 
-// Calibrate after testing: dip sensor in dry soil and wet soil, read raw values via Serial
+// PLACEHOLDERS — must be recalibrated per physical sensor. Enable DEBUG_SOIL_RAW
+// below, open Serial Monitor, and note the raw analogRead() value in dry air and
+// again with the probe in wet soil, then set these two to what you measured.
+// Also note: if your sensor's WET reading is LOWER than its DRY reading (typical
+// for resistive/capacitive probes wired the usual way), use the first map() call
+// in readMoisturePercent(); if it's inverted on your sensor (wet > dry), use the
+// second one instead — see that function below.
 #define SOIL_DRY 3000
 #define SOIL_WET 1200
+
+// Set to 1 to continuously print the raw ADC value from SOIL_PIN over Serial so
+// you can capture real dry-air/wet-soil readings for calibration above. Leave at
+// 0 for normal operation.
+#define DEBUG_SOIL_RAW 0
 
 // ---------- BLE UUIDs (must match the app's src/constants/ble.ts) ----------
 #define SERVICE_UUID      "12345678-1234-5678-1234-56789abc0000"
@@ -27,7 +38,6 @@
 
 // ---------- Timing ----------
 const unsigned long CHECK_INTERVAL_MS     = 10000;   // how often to read sensors
-const unsigned long PUMP_RUN_MS           = 3000;    // fixed-duration pump mode
 const unsigned long PUMP_SAFETY_MAX_MS    = 20000;   // hard cap for moisture-feedback mode, no matter what
 const unsigned long PUMP_PULSE_MS         = 1500;    // moisture mode: burst length between checks
 const unsigned long PUMP_SETTLE_MS        = 800;     // moisture mode: pause after a burst so the reading reflects reality
@@ -37,6 +47,7 @@ const unsigned long MIN_WATER_INTERVAL_MS = 600000;  // 10 min cooldown between 
 const float DEFAULT_TEMP_THRESHOLD  = 28.0; // water only if temp >= this (it's warm enough)
 const int   DEFAULT_SOIL_THRESHOLD  = 40;   // water only if moisture % is below this (it's dry)
 const int   DEFAULT_SOIL_WET_TARGET = 65;   // moisture-mode pump target: stop once soil reaches this %
+const unsigned long DEFAULT_PUMP_DURATION_MS = 20000; // fixed-duration pump mode run length
 
 DHT dht(DHTPIN, DHTTYPE);
 Preferences prefs;
@@ -56,6 +67,7 @@ int soilThreshold = DEFAULT_SOIL_THRESHOLD;
 
 String pumpMode = "duration"; // "duration" (fixed burst) or "moisture" (until soil is wet)
 int soilWetTarget = DEFAULT_SOIL_WET_TARGET;
+unsigned long pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
 
 // ---------- Schedule ----------
 bool schedEnabled = true;
@@ -100,6 +112,7 @@ void loadConfig() {
   soilThreshold = prefs.getInt("soilTh", DEFAULT_SOIL_THRESHOLD);
   pumpMode = prefs.getString("pumpMode", "duration");
   soilWetTarget = prefs.getInt("wetTarget", DEFAULT_SOIL_WET_TARGET);
+  pumpDurationMs = prefs.getULong("pumpDurMs", DEFAULT_PUMP_DURATION_MS);
   schedEnabled = prefs.getBool("schedOn", true);
   schedMode = prefs.getString("schedMode", "daily");
   schedHour = prefs.getInt("schedHour", 5);
@@ -116,6 +129,7 @@ void saveConfig() {
   prefs.putInt("soilTh", soilThreshold);
   prefs.putString("pumpMode", pumpMode);
   prefs.putInt("wetTarget", soilWetTarget);
+  prefs.putULong("pumpDurMs", pumpDurationMs);
   prefs.putBool("schedOn", schedEnabled);
   prefs.putString("schedMode", schedMode);
   prefs.putInt("schedHour", schedHour);
@@ -132,6 +146,7 @@ void pushConfig() {
   doc["soilThreshold"] = soilThreshold;
   doc["pumpMode"] = pumpMode;
   doc["soilWetTarget"] = soilWetTarget;
+  doc["pumpDurationMs"] = pumpDurationMs;
 
   JsonObject sched = doc.createNestedObject("schedule");
   sched["enabled"] = schedEnabled;
@@ -154,6 +169,7 @@ void resetToDefaults() {
   soilThreshold = DEFAULT_SOIL_THRESHOLD;
   pumpMode = "duration";
   soilWetTarget = DEFAULT_SOIL_WET_TARGET;
+  pumpDurationMs = DEFAULT_PUMP_DURATION_MS;
   schedEnabled = true;
   schedMode = "daily";
   schedHour = 5;
@@ -186,6 +202,7 @@ class ConfigCallbacks : public NimBLECharacteristicCallbacks {
       if (doc.containsKey("soilThreshold")) soilThreshold = doc["soilThreshold"];
       if (doc.containsKey("pumpMode")) pumpMode = doc["pumpMode"].as<String>();
       if (doc.containsKey("soilWetTarget")) soilWetTarget = doc["soilWetTarget"];
+      if (doc.containsKey("pumpDurationMs")) pumpDurationMs = doc["pumpDurationMs"];
 
       if (doc.containsKey("schedule")) {
         JsonObject sched = doc["schedule"];
@@ -238,7 +255,12 @@ class TimeCallbacks : public NimBLECharacteristicCallbacks {
 // ---------- Sensors ----------
 int readMoisturePercent() {
   int raw = analogRead(SOIL_PIN);
-  int percent = map(raw, SOIL_DRY, SOIL_WET, 0, 100);
+
+  // Pick whichever of these matches your sensor's calibration direction (see the
+  // SOIL_DRY/SOIL_WET comment above). Only one should be uncommented at a time.
+  int percent = map(raw, SOIL_DRY, SOIL_WET, 0, 100);   // wet reading LOWER than dry
+  // int percent = map(raw, SOIL_WET, SOIL_DRY, 100, 0); // wet reading HIGHER than dry (inverted)
+
   return constrain(percent, 0, 100);
 }
 
@@ -293,7 +315,7 @@ void waterPlant(bool manual) {
     }
   } else {
     digitalWrite(RELAY_PIN, HIGH); // adjust to LOW if your relay is active-low
-    delay(PUMP_RUN_MS);
+    delay(pumpDurationMs);
     digitalWrite(RELAY_PIN, LOW);
   }
 
@@ -420,6 +442,11 @@ void setup() {
 }
 
 void loop() {
+#if DEBUG_SOIL_RAW
+  Serial.println(analogRead(SOIL_PIN));
+  delay(200);
+#endif
+
   if (pendingWaterNow) {
     pendingWaterNow = false;
     waterPlant(true);
