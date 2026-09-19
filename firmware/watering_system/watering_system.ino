@@ -212,7 +212,7 @@ void updateHistoryChar() {
   // oldest entry is always at index 0.
   int oldestIndex = (historyCount < HISTORY_CAPACITY) ? 0 : historyHead;
 
-  StaticJsonDocument<1024> doc;
+  StaticJsonDocument<2048> doc;
   JsonArray arr = doc.to<JsonArray>();
   for (int i = 0; i < historyCount; i++) {
     int idx = (oldestIndex + i) % HISTORY_CAPACITY;
@@ -226,9 +226,14 @@ void updateHistoryChar() {
   String out;
   serializeJson(doc, out);
   historyChar->setValue(out.c_str());
+
+  Serial.print("[history] entries="); Serial.print(historyCount);
+  Serial.print(" overflowed="); Serial.print(doc.overflowed());
+  Serial.print(" json="); Serial.println(out);
 }
 
 void recordWateringEvent(int soilAfter) {
+  Serial.print("[history] recording watering event, soilAfter="); Serial.println(soilAfter);
   WateringLogEntry &entry = history[historyHead];
   entry.epoch = timeSynced ? (uint32_t)currentLocalEpoch() : 0;
   entry.temp = lastTemp;
@@ -513,10 +518,22 @@ void publishPumpStatus() {
 }
 
 void checkAutoWater(int moisture) {
-  if (pumpActive) return;
   bool tempOk = !isnan(lastTemp) && lastTemp >= tempMin && lastTemp <= tempMax;
   bool humOk = !isnan(lastHum) && lastHum >= humMin && lastHum <= humMax;
   bool soilDry = moisture < soilThreshold;
+
+  Serial.print("[auto-water] temp="); Serial.print(lastTemp);
+  Serial.print(" (need "); Serial.print(tempMin); Serial.print("-"); Serial.print(tempMax);
+  Serial.print(", ok="); Serial.print(tempOk);
+  Serial.print(") hum="); Serial.print(lastHum);
+  Serial.print(" (need "); Serial.print(humMin); Serial.print("-"); Serial.print(humMax);
+  Serial.print(", ok="); Serial.print(humOk);
+  Serial.print(") soil="); Serial.print(moisture);
+  Serial.print(" (need <"); Serial.print(soilThreshold);
+  Serial.print(", dry="); Serial.print(soilDry);
+  Serial.print(") pumpActive="); Serial.println(pumpActive);
+
+  if (pumpActive) return;
   if (tempOk && humOk && soilDry) startWatering(false);
 }
 
@@ -566,6 +583,19 @@ void setup() {
 
   loadConfig();
   loadHistory();
+
+  // Version marker + current config dump — if you don't see this exact line
+  // (or the values look wrong) after uploading, the ESP32 is still running
+  // an older sketch and needs a fresh upload.
+  Serial.println("=== PlantWaterer firmware: range-based auto-water + emergency stop + history sync ===");
+  Serial.print("tempMin="); Serial.print(tempMin);
+  Serial.print(" tempMax="); Serial.print(tempMax);
+  Serial.print(" humMin="); Serial.print(humMin);
+  Serial.print(" humMax="); Serial.print(humMax);
+  Serial.print(" soilThreshold="); Serial.print(soilThreshold);
+  Serial.print(" pumpMode="); Serial.print(pumpMode);
+  Serial.print(" soilMaxPercent="); Serial.print(soilMaxPercent);
+  Serial.print(" historyCount="); Serial.println(historyCount);
 
   NimBLEDevice::init(DEVICE_NAME);
   pServer = NimBLEDevice::createServer();
