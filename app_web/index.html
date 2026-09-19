@@ -848,9 +848,35 @@
   function applyConfigValue(dataView) {
     var text = decodeText(dataView);
     try {
-      renderConfig(JSON.parse(text));
+      var config = JSON.parse(text);
+      renderConfig(config);
+      saveCachedConfig(config);
     } catch (err) {
       console.warn('Malformed config payload', text);
+    }
+  }
+
+  // Caches the last config seen from the device so Settings shows real
+  // values immediately on page load instead of the HTML's hardcoded
+  // defaults, before a Bluetooth connection is even made. The device is
+  // still the source of truth — connecting always re-syncs from it.
+  var SETTINGS_CACHE_KEY = 'plant-waterer-settings-cache';
+
+  function saveCachedConfig(config) {
+    try {
+      localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(config));
+    } catch (err) {
+      console.warn('Could not cache settings locally', err);
+    }
+  }
+
+  function loadCachedConfig() {
+    try {
+      var raw = localStorage.getItem(SETTINGS_CACHE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      console.warn('Could not read cached settings', err);
+      return null;
     }
   }
 
@@ -1301,6 +1327,8 @@
     el.connectBtn.disabled = true;
     el.connectBtn.textContent = 'Web Bluetooth not available';
   }
+  var cachedConfig = loadCachedConfig();
+  if (cachedConfig) renderConfig(cachedConfig);
   updatePumpModeFields();
   updateScheduleEditability();
   renderDayToggles();
