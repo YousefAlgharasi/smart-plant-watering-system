@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#2e7d32" />
+<title>Plant Waterer Dashboard</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --color-primary: #2e7d32;
+    --color-primary-dark: #1b5e20;
+    --color-accent: #1565c0;
+    --color-accent-dark: #0d47a1;
+    --color-danger: #c62828;
+    --color-danger-dark: #8e0000;
+    --color-bg: #f5f7f5;
+    --color-surface: #ffffff;
+    --color-text: #1a1a1a;
+    --color-text-muted: #666666;
+    --color-border: #e2e5e2;
+    --radius: 14px;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-bg: #101410;
+      --color-surface: #1b201b;
+      --color-text: #eef1ee;
+      --color-text-muted: #9aa39a;
+      --color-border: #2a312a;
+      --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  .app {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 16px 16px 40px;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 4px 20px;
+    gap: 12px;
+  }
+
+  .brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .brand-icon { font-size: 26px; }
+  .topbar h1 { font-size: 19px; margin: 0; font-weight: 700; white-space: nowrap; }
+
+  .conn-info { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--color-text-muted); }
+  .conn-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--color-primary);
+    box-shadow: 0 0 0 3px rgba(46, 125, 50, 0.2); flex-shrink: 0;
+  }
+  #device-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+
+  .link-btn {
+    background: none; border: none; color: var(--color-accent);
+    font-size: 13px; padding: 4px; cursor: pointer; text-decoration: underline;
+    font-family: inherit; white-space: nowrap;
+  }
+
+  .hidden { display: none !important; }
+
+  .browser-note {
+    font-size: 13px; color: var(--color-text-muted); text-align: center;
+    margin: 16px 4px 0;
+  }
+
+  .warning-banner {
+    background: #fff3e0; color: #8a4b00; border: 1px solid #ffcc80;
+    border-radius: var(--radius); padding: 12px 14px; font-size: 14px; margin-bottom: 16px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .warning-banner { background: #3a2a10; color: #ffcc80; border-color: #5a3d10; }
+  }
+
+  .screen { animation: fade-in 0.15s ease-out; }
+  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+  .connect-card {
+    background: var(--color-surface); border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 32px 24px; text-align: center; margin-top: 32px;
+  }
+  .connect-card .hint { color: var(--color-text-muted); margin: 0 0 24px; }
+
+  .status-text { min-height: 18px; font-size: 13px; color: var(--color-text-muted); margin-top: 12px; }
+
+  button { font-family: inherit; }
+
+  .primary-btn, .accent-btn, .danger-btn {
+    border: none; border-radius: var(--radius); padding: 14px 20px; font-size: 16px;
+    font-weight: 700; color: #fff; cursor: pointer; width: 100%;
+  }
+  .primary-btn { background: var(--color-primary); }
+  .primary-btn:active { background: var(--color-primary-dark); }
+  .accent-btn { background: var(--color-accent); }
+  .accent-btn:active { background: var(--color-accent-dark); }
+  .danger-btn { background: var(--color-danger); }
+  .danger-btn:active { background: var(--color-danger-dark); }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px;
+  }
+  .card {
+    background: var(--color-surface); border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 16px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .card.wide { grid-column: 1 / -1; }
+  .card .label { font-size: 13px; color: var(--color-text-muted); }
+  .card .value { font-size: 22px; font-weight: 700; }
+  .card .value.pump-on { color: var(--color-accent); }
+
+  .actions { display: flex; gap: 10px; margin-bottom: 20px; }
+  .actions .primary-btn, .actions .accent-btn { flex: 1; }
+
+  .settings-card, .history-card {
+    background: var(--color-surface); border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 20px; margin-bottom: 20px;
+  }
+  .settings-card h2, .history-card h2 { margin: 0 0 16px; font-size: 17px; }
+
+  .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .field-label { display: block; font-size: 13px; color: var(--color-text-muted); margin: 16px 0 6px; }
+
+  input[type="number"] {
+    width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--color-border);
+    font-size: 16px; background: var(--color-bg); color: var(--color-text);
+  }
+  input[type="number"]:disabled { opacity: 0.5; }
+
+  .switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch-slider {
+    position: absolute; inset: 0; background: var(--color-border); border-radius: 999px;
+    transition: background 0.15s; cursor: pointer;
+  }
+  .switch-slider::before {
+    content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: transform 0.15s;
+  }
+  .switch input:checked + .switch-slider { background: var(--color-primary); }
+  .switch input:checked + .switch-slider::before { transform: translateX(20px); }
+
+  .settings-card .actions { margin-top: 20px; margin-bottom: 0; }
+
+  .history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  .history-list li {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+    font-size: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--color-border);
+  }
+  .history-list li:last-child { border-bottom: none; padding-bottom: 0; }
+  .history-list li.empty { color: var(--color-text-muted); justify-content: center; border-bottom: none; }
+  .history-time { font-weight: 600; }
+  .history-detail { color: var(--color-text-muted); text-align: right; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px);
+    background: var(--color-primary-dark); color: #fff; padding: 14px 22px; border-radius: 999px;
+    font-size: 14px; font-weight: 600; box-shadow: var(--shadow); opacity: 0;
+    transition: opacity 0.25s, transform 0.25s;
+    max-width: calc(100% - 32px); text-align: center; z-index: 100;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<noscript>This dashboard needs JavaScript enabled to talk to your ESP32 over Bluetooth.</noscript>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-icon">🌱</span>
+      <h1>Plant Waterer</h1>
+    </div>
+    <div class="conn-info hidden" id="conn-info">
+      <span class="conn-dot"></span>
+      <span id="device-label">Connected</span>
+      <button type="button" id="disconnect-btn" class="link-btn">Disconnect</button>
+    </div>
+  </header>
+
+  <p id="browser-warning" class="warning-banner hidden">
+    ⚠️ Your browser doesn't support Web Bluetooth, so this dashboard can't connect to
+    the plant waterer here. Open this page in <strong>Chrome</strong> or
+    <strong>Edge</strong> (desktop or Android) instead.
+  </p>
+
+  <section id="connect-screen" class="screen">
+    <div class="connect-card">
+      <p class="hint">Make sure your ESP32 plant waterer is powered on and nearby, then connect over Bluetooth.</p>
+      <button type="button" id="connect-btn" class="primary-btn">Connect to PlantWaterer</button>
+      <p id="connect-status" class="status-text" aria-live="polite"></p>
+    </div>
+    <p class="browser-note">Web Bluetooth works in Chrome or Edge only (desktop or Android) — Safari and Firefox aren't supported.</p>
+  </section>
+
+  <section id="dashboard-screen" class="screen hidden">
+    <div class="grid">
+      <div class="card">
+        <span class="label">Temperature</span>
+        <span class="value" id="val-temp">--</span>
+      </div>
+      <div class="card">
+        <span class="label">Humidity</span>
+        <span class="value" id="val-hum">--</span>
+      </div>
+      <div class="card">
+        <span class="label">Soil Moisture</span>
+        <span class="value" id="val-soil">--</span>
+      </div>
+      <div class="card">
+        <span class="label">Pump</span>
+        <span class="value" id="val-pump">--</span>
+      </div>
+      <div class="card wide">
+        <span class="label">Last Watered</span>
+        <span class="value" id="val-last-watered">No history yet</span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="refresh-btn" class="primary-btn">Refresh Now</button>
+      <button type="button" id="water-btn" class="accent-btn">Water Now</button>
+    </div>
+
+    <section class="settings-card">
+      <h2>Settings</h2>
+      <div class="row">
+        <label class="field-label" for="mode-toggle" style="margin:0;">Custom mode</label>
+        <label class="switch">
+          <input type="checkbox" id="mode-toggle" />
+          <span class="switch-slider"></span>
+        </label>
+      </div>
+
+      <label class="field-label" for="temp-threshold">Water when temperature is at least (°C)</label>
+      <input type="number" id="temp-threshold" step="0.1" value="28" />
+
+      <label class="field-label" for="soil-threshold">Water when soil moisture is below (%)</label>
+      <input type="number" id="soil-threshold" step="1" min="0" max="100" value="40" />
+
+      <div class="actions">
+        <button type="button" id="save-settings-btn" class="primary-btn">Save</button>
+        <button type="button" id="reset-settings-btn" class="danger-btn">Reset to Default</button>
+      </div>
+      <p id="settings-status" class="status-text" aria-live="polite"></p>
+    </section>
+
+    <section class="history-card">
+      <h2>Watering History</h2>
+      <ul id="history-list" class="history-list">
+        <li class="empty">No watering events yet.</li>
+      </ul>
+    </section>
+  </section>
+</div>
+
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var SERVICE_UUID = '12345678-1234-5678-1234-56789abc0000';
+  var SENSOR_CHAR_UUID = '12345678-1234-5678-1234-56789abc0001';
+  var EVENT_CHAR_UUID = '12345678-1234-5678-1234-56789abc0002';
+  var CONFIG_CHAR_UUID = '12345678-1234-5678-1234-56789abc0003';
+  var COMMAND_CHAR_UUID = '12345678-1234-5678-1234-56789abc0004';
+  var DEVICE_NAME = 'PlantWaterer';
+  var REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+  var HISTORY_LIMIT = 10;
+
+  // ---------- IndexedDB ----------
+  var DB_NAME = 'plant-waterer';
+  var DB_VERSION = 1;
+  var dbPromise = null;
+
+  function openDB() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise(function (resolve, reject) {
+      var req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains('readings')) {
+          db.createObjectStore('readings', { keyPath: 'id', autoIncrement: true });
+        }
+        if (!db.objectStoreNames.contains('watering_events')) {
+          db.createObjectStore('watering_events', { keyPath: 'id', autoIncrement: true });
+        }
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+    return dbPromise;
+  }
+
+  function addRecord(storeName, record) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).add(record);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  // Most-recent-first, capped at `limit` — mirrors `ORDER BY id DESC LIMIT`.
+  function getRecent(storeName, limit) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(storeName, 'readonly');
+        var store = tx.objectStore(storeName);
+        var results = [];
+        var req = store.openCursor(null, 'prev');
+        req.onsuccess = function () {
+          var cursor = req.result;
+          if (cursor && results.length < limit) {
+            results.push(cursor.value);
+            cursor.continue();
+          } else {
+            resolve(results);
+          }
+        };
+        req.onerror = function () { reject(req.error); };
+      });
+    });
+  }
+
+  function insertReading(reading) {
+    return addRecord('readings', {
+      temp: reading.temp,
+      hum: reading.hum,
+      soil: reading.soil,
+      timestamp: Date.now(),
+    });
+  }
+
+  function insertWateringEvent(reading) {
+    return addRecord('watering_events', {
+      temp: reading ? reading.temp : null,
+      hum: reading ? reading.hum : null,
+      soil: reading ? reading.soil : null,
+      timestamp: Date.now(),
+    });
+  }
+
+  function getLastWateringEvent() {
+    return getRecent('watering_events', 1).then(function (rows) { return rows[0] || null; });
+  }
+
+  function getWateringHistory(limit) {
+    return getRecent('watering_events', limit || HISTORY_LIMIT);
+  }
+
+  // ---------- DOM ----------
+  var el = {
+    browserWarning: document.getElementById('browser-warning'),
+    connectScreen: document.getElementById('connect-screen'),
+    dashboardScreen: document.getElementById('dashboard-screen'),
+    connectBtn: document.getElementById('connect-btn'),
+    connectStatus: document.getElementById('connect-status'),
+    connInfo: document.getElementById('conn-info'),
+    deviceLabel: document.getElementById('device-label'),
+    disconnectBtn: document.getElementById('disconnect-btn'),
+    refreshBtn: document.getElementById('refresh-btn'),
+    waterBtn: document.getElementById('water-btn'),
+    valTemp: document.getElementById('val-temp'),
+    valHum: document.getElementById('val-hum'),
+    valSoil: document.getElementById('val-soil'),
+    valPump: document.getElementById('val-pump'),
+    valLastWatered: document.getElementById('val-last-watered'),
+    modeToggle: document.getElementById('mode-toggle'),
+    tempThreshold: document.getElementById('temp-threshold'),
+    soilThreshold: document.getElementById('soil-threshold'),
+    saveSettingsBtn: document.getElementById('save-settings-btn'),
+    resetSettingsBtn: document.getElementById('reset-settings-btn'),
+    settingsStatus: document.getElementById('settings-status'),
+    historyList: document.getElementById('history-list'),
+    toast: document.getElementById('toast'),
+  };
+
+  // ---------- BLE state ----------
+  var ble = {
+    device: null,
+    sensorChar: null,
+    eventChar: null,
+    configChar: null,
+    commandChar: null,
+  };
+  var lastReading = null;
+  var refreshTimer = null;
+
+  function isWebBluetoothSupported() {
+    return 'bluetooth' in navigator;
+  }
+
+  function decodeText(dataView) {
+    return new TextDecoder('utf-8').decode(dataView);
+  }
+
+  async function connect() {
+    var device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }],
+    });
+
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+
+    el.connectStatus.textContent = 'Connecting to ' + (device.name || DEVICE_NAME) + '…';
+    var server = await device.gatt.connect();
+    var service = await server.getPrimaryService(SERVICE_UUID);
+
+    var sensorChar = await service.getCharacteristic(SENSOR_CHAR_UUID);
+    var eventChar = await service.getCharacteristic(EVENT_CHAR_UUID);
+    var configChar = await service.getCharacteristic(CONFIG_CHAR_UUID);
+    var commandChar = await service.getCharacteristic(COMMAND_CHAR_UUID);
+
+    ble.device = device;
+    ble.sensorChar = sensorChar;
+    ble.eventChar = eventChar;
+    ble.configChar = configChar;
+    ble.commandChar = commandChar;
+
+    sensorChar.addEventListener('characteristicvaluechanged', handleSensorNotification);
+    await sensorChar.startNotifications();
+
+    eventChar.addEventListener('characteristicvaluechanged', handleEventNotification);
+    await eventChar.startNotifications();
+
+    configChar.addEventListener('characteristicvaluechanged', handleConfigNotification);
+    await configChar.startNotifications();
+
+    // The device only notifies CONFIG when it changes, so read the current
+    // value directly — otherwise settings would show stale UI defaults until
+    // something on the device side changes them.
+    try {
+      applyConfigValue(await configChar.readValue());
+    } catch (err) {
+      console.warn('Could not read initial config', err);
+    }
+
+    onConnected(device.name || DEVICE_NAME);
+
+    // Kick an immediate sensor reading instead of waiting up to ~10s for the
+    // ESP32's next periodic push.
+    writeCommand('REFRESH').catch(function (err) { console.warn('Initial refresh failed', err); });
+  }
+
+  function handleSensorNotification(event) {
+    var text = decodeText(event.target.value);
+    var data;
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      console.warn('Malformed sensor payload', text);
+      return;
+    }
+    lastReading = data;
+    renderReading(data);
+    insertReading(data).catch(function (err) { console.warn('Failed to store reading', err); });
+  }
+
+  async function handleEventNotification(event) {
+    var text = decodeText(event.target.value);
+    if (text !== 'WATERED') return;
+
+    if (lastReading) {
+      await insertWateringEvent(lastReading).catch(function (err) {
+        console.warn('Failed to store watering event', err);
+      });
+      await refreshHistory();
+    }
+    showToast('🌱 Plant watered!');
+  }
+
+  function applyConfigValue(dataView) {
+    var text = decodeText(dataView);
+    try {
+      renderConfig(JSON.parse(text));
+    } catch (err) {
+      console.warn('Malformed config payload', text);
+    }
+  }
+
+  function handleConfigNotification(event) {
+    applyConfigValue(event.target.value);
+    setSettingsStatus('Settings updated from device.');
+  }
+
+  function onDisconnected() {
+    stopAutoRefresh();
+    ble.device = null;
+    ble.sensorChar = null;
+    ble.eventChar = null;
+    ble.configChar = null;
+    ble.commandChar = null;
+    lastReading = null;
+    showConnectScreen();
+  }
+
+  function disconnect() {
+    if (ble.device && ble.device.gatt.connected) {
+      ble.device.gatt.disconnect(); // fires gattserverdisconnected -> onDisconnected
+    } else {
+      onDisconnected();
+    }
+  }
+
+  async function writeCommand(cmd) {
+    if (!ble.commandChar) return;
+    await ble.commandChar.writeValue(new TextEncoder().encode(cmd));
+  }
+
+  async function writeConfig(config) {
+    if (!ble.configChar) return;
+    await ble.configChar.writeValue(new TextEncoder().encode(JSON.stringify(config)));
+  }
+
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    refreshTimer = setInterval(function () {
+      writeCommand('REFRESH').catch(function (err) { console.warn('Auto-refresh failed', err); });
+    }, REFRESH_INTERVAL_MS);
+  }
+
+  function stopAutoRefresh() {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+  }
+
+  // ---------- UI ----------
+  function showConnectScreen() {
+    el.dashboardScreen.classList.add('hidden');
+    el.connInfo.classList.add('hidden');
+    el.connectScreen.classList.remove('hidden');
+    el.connectBtn.disabled = false;
+    el.connectBtn.textContent = 'Connect to PlantWaterer';
+  }
+
+  function onConnected(deviceLabel) {
+    el.connectStatus.textContent = '';
+    el.deviceLabel.textContent = deviceLabel;
+    el.connectScreen.classList.add('hidden');
+    el.dashboardScreen.classList.remove('hidden');
+    el.connInfo.classList.remove('hidden');
+    startAutoRefresh();
+    refreshHistory();
+  }
+
+  function renderReading(data) {
+    el.valTemp.textContent = typeof data.temp === 'number' ? data.temp.toFixed(1) + ' °C' : '--';
+    el.valHum.textContent = typeof data.hum === 'number' ? data.hum.toFixed(1) + ' %' : '--';
+    el.valSoil.textContent = typeof data.soil === 'number' ? data.soil + ' %' : '--';
+    el.valPump.textContent = data.pump ? 'Running' : 'Idle';
+    el.valPump.classList.toggle('pump-on', !!data.pump);
+  }
+
+  function renderConfig(config) {
+    el.modeToggle.checked = config.mode === 'custom';
+    if (typeof config.tempThreshold === 'number') el.tempThreshold.value = config.tempThreshold;
+    if (typeof config.soilThreshold === 'number') el.soilThreshold.value = config.soilThreshold;
+    updateThresholdEditability();
+  }
+
+  function updateThresholdEditability() {
+    var custom = el.modeToggle.checked;
+    el.tempThreshold.disabled = !custom;
+    el.soilThreshold.disabled = !custom;
+  }
+
+  var settingsStatusTimer = null;
+  function setSettingsStatus(msg) {
+    el.settingsStatus.textContent = msg;
+    clearTimeout(settingsStatusTimer);
+    if (msg) {
+      settingsStatusTimer = setTimeout(function () {
+        el.settingsStatus.textContent = '';
+      }, 4000);
+    }
+  }
+
+  function formatTimestamp(ts) {
+    return new Date(ts).toLocaleString();
+  }
+
+  async function refreshHistory() {
+    var last = await getLastWateringEvent();
+    el.valLastWatered.textContent = last ? formatTimestamp(last.timestamp) : 'No history yet';
+
+    var history = await getWateringHistory(HISTORY_LIMIT);
+    el.historyList.innerHTML = '';
+    if (history.length === 0) {
+      var empty = document.createElement('li');
+      empty.className = 'empty';
+      empty.textContent = 'No watering events yet.';
+      el.historyList.appendChild(empty);
+      return;
+    }
+    history.forEach(function (evt) {
+      var li = document.createElement('li');
+
+      var time = document.createElement('span');
+      time.className = 'history-time';
+      time.textContent = formatTimestamp(evt.timestamp);
+
+      var detail = document.createElement('span');
+      detail.className = 'history-detail';
+      detail.textContent = (typeof evt.temp === 'number' && typeof evt.hum === 'number' && typeof evt.soil === 'number')
+        ? evt.temp.toFixed(1) + '°C · ' + evt.hum.toFixed(1) + '% hum · ' + evt.soil + '% soil'
+        : 'no reading captured';
+
+      li.appendChild(time);
+      li.appendChild(detail);
+      el.historyList.appendChild(li);
+    });
+  }
+
+  var toastTimer = null;
+  function showToast(message) {
+    el.toast.textContent = message;
+    el.toast.classList.remove('hidden');
+    requestAnimationFrame(function () { el.toast.classList.add('show'); });
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      el.toast.classList.remove('show');
+      setTimeout(function () { el.toast.classList.add('hidden'); }, 300);
+    }, 3500);
+  }
+
+  // ---------- Event wiring ----------
+  el.connectBtn.addEventListener('click', async function () {
+    el.connectBtn.disabled = true;
+    el.connectStatus.textContent = 'Choose your device in the browser prompt…';
+    try {
+      await connect();
+    } catch (err) {
+      console.warn('Connection failed', err);
+      el.connectBtn.disabled = false;
+      el.connectStatus.textContent = (err && err.name === 'NotFoundError')
+        ? 'No device selected.'
+        : 'Connection failed: ' + (err && err.message ? err.message : err);
+    }
+  });
+
+  el.disconnectBtn.addEventListener('click', disconnect);
+
+  el.refreshBtn.addEventListener('click', async function () {
+    el.refreshBtn.disabled = true;
+    var original = el.refreshBtn.textContent;
+    el.refreshBtn.textContent = 'Refreshing…';
+    try {
+      await writeCommand('REFRESH');
+    } catch (err) {
+      console.warn('Refresh failed', err);
+    } finally {
+      el.refreshBtn.disabled = false;
+      el.refreshBtn.textContent = original;
+    }
+  });
+
+  el.waterBtn.addEventListener('click', async function () {
+    el.waterBtn.disabled = true;
+    try {
+      await writeCommand('WATER_NOW');
+    } catch (err) {
+      console.warn('Water now failed', err);
+    } finally {
+      el.waterBtn.disabled = false;
+    }
+  });
+
+  el.modeToggle.addEventListener('change', updateThresholdEditability);
+
+  el.saveSettingsBtn.addEventListener('click', async function () {
+    var tempThreshold = parseFloat(el.tempThreshold.value);
+    var soilThreshold = parseInt(el.soilThreshold.value, 10);
+    if (Number.isNaN(tempThreshold) || Number.isNaN(soilThreshold)) {
+      setSettingsStatus('Enter valid numbers before saving.');
+      return;
+    }
+    var config = {
+      mode: el.modeToggle.checked ? 'custom' : 'default',
+      tempThreshold: tempThreshold,
+      soilThreshold: soilThreshold,
+    };
+    try {
+      await writeConfig(config);
+      setSettingsStatus('Saved to device.');
+    } catch (err) {
+      console.warn('Save failed', err);
+      setSettingsStatus('Save failed — check the connection.');
+    }
+  });
+
+  el.resetSettingsBtn.addEventListener('click', async function () {
+    try {
+      setSettingsStatus('Resetting…');
+      await writeCommand('RESET_DEFAULTS');
+    } catch (err) {
+      console.warn('Reset failed', err);
+      setSettingsStatus('Reset failed — check the connection.');
+    }
+  });
+
+  // ---------- Init ----------
+  if (!isWebBluetoothSupported()) {
+    el.browserWarning.classList.remove('hidden');
+    el.connectBtn.disabled = true;
+    el.connectBtn.textContent = 'Web Bluetooth not available';
+  }
+  updateThresholdEditability();
+  showConnectScreen();
+})();
+</script>
+</body>
+</html>

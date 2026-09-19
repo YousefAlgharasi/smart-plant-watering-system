@@ -12,6 +12,9 @@ dashboard app connected over Bluetooth LE.
 - **`app/`** — React Native app. Scans for the ESP32 over Bluetooth,
   shows a live dashboard, lets you set default/custom watering thresholds,
   and logs every reading + watering event to a local SQLite database.
+- **`app_web/`** — Static, no-build web dashboard (Web Bluetooth API). Same
+  features as the React Native app, backed by IndexedDB instead of SQLite.
+  Works in Chrome/Edge only (desktop or Android).
 
 ## Hardware
 
@@ -31,6 +34,9 @@ dashboard app connected over Bluetooth LE.
    then upload.
 2. **Run the app** — see `app/README.md` for full setup (bare React Native
    project, BLE + SQLite dependencies, Android/iOS permissions).
+3. **Or use the web dashboard** — see `app_web/README.md`. No install: open
+   `app_web/index.html` in Chrome or Edge (desktop or Android) and hit
+   Connect.
 
 ## How it works
 

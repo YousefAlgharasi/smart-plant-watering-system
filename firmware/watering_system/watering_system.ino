@@ -1,13 +1,13 @@
 #include <DHT.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+// NimBLE instead of the stock BLEDevice.h (Bluedroid): Bluedroid's GATT server
+// is known to fail the connect handshake from Windows Web Bluetooth with a
+// generic "Connection failed for unknown reason" error. NimBLE fixes this.
+#include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 
 // ---------- Pins ----------
-#define DHTPIN 4
+#define DHTPIN 16
 #define DHTTYPE DHT22
 #define SOIL_PIN 34
 #define RELAY_PIN 27
@@ -36,11 +36,11 @@ const int   DEFAULT_SOIL_THRESHOLD = 40;   // water only if moisture % is below 
 DHT dht(DHTPIN, DHTTYPE);
 Preferences prefs;
 
-BLEServer *pServer;
-BLECharacteristic *sensorChar;
-BLECharacteristic *eventChar;
-BLECharacteristic *configChar;
-BLECharacteristic *commandChar;
+NimBLEServer *pServer;
+NimBLECharacteristic *sensorChar;
+NimBLECharacteristic *eventChar;
+NimBLECharacteristic *configChar;
+NimBLECharacteristic *commandChar;
 
 bool deviceConnected = false;
 
@@ -95,18 +95,19 @@ void resetToDefaults() {
 }
 
 // ---------- BLE callbacks ----------
-class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer *s) override {
+class ServerCallbacks : public NimBLEServerCallbacks {
+  // NimBLE 2.x passes connection info as a second argument on every callback.
+  void onConnect(NimBLEServer *s, NimBLEConnInfo &connInfo) override {
     deviceConnected = true;
   }
-  void onDisconnect(BLEServer *s) override {
+  void onDisconnect(NimBLEServer *s, NimBLEConnInfo &connInfo, int reason) override {
     deviceConnected = false;
-    BLEDevice::startAdvertising(); // stay discoverable after a disconnect
+    NimBLEDevice::startAdvertising(); // stay discoverable after a disconnect
   }
 };
 
-class ConfigCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *c) override {
+class ConfigCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &connInfo) override {
     String value = c->getValue().c_str();
     StaticJsonDocument<128> doc;
     if (deserializeJson(doc, value) == DeserializationError::Ok) {
@@ -119,8 +120,8 @@ class ConfigCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
-class CommandCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *c) override {
+class CommandCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &connInfo) override {
     String cmd = c->getValue().c_str();
     if (cmd == "WATER_NOW") {
       waterPlant(true);
@@ -206,44 +207,44 @@ void setup() {
 
   loadConfig();
 
-  BLEDevice::init(DEVICE_NAME);
-  pServer = BLEDevice::createServer();
+  NimBLEDevice::init(DEVICE_NAME);
+  pServer = NimBLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
-  BLEService *service = pServer->createService(SERVICE_UUID);
+  NimBLEService *service = pServer->createService(SERVICE_UUID);
 
+  // NimBLE auto-creates the CCCD (0x2902) descriptor for any characteristic
+  // with the NOTIFY property, so no manual addDescriptor() call is needed.
   sensorChar = service->createCharacteristic(
     SENSOR_CHAR_UUID,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
   );
-  sensorChar->addDescriptor(new BLE2902());
 
   eventChar = service->createCharacteristic(
     EVENT_CHAR_UUID,
-    BLECharacteristic::PROPERTY_NOTIFY
+    NIMBLE_PROPERTY::NOTIFY
   );
-  eventChar->addDescriptor(new BLE2902());
 
   configChar = service->createCharacteristic(
     CONFIG_CHAR_UUID,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY
   );
-  configChar->addDescriptor(new BLE2902());
   configChar->setCallbacks(new ConfigCallbacks());
 
   commandChar = service->createCharacteristic(
     COMMAND_CHAR_UUID,
-    BLECharacteristic::PROPERTY_WRITE
+    NIMBLE_PROPERTY::WRITE
   );
   commandChar->setCallbacks(new CommandCallbacks());
 
   service->start();
   pushConfig();
 
-  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(SERVICE_UUID);
-  advertising->setScanResponse(true);
-  BLEDevice::startAdvertising();
+  // NimBLE 2.x dropped the setScanResponse(bool) toggle and manages scan
+  // response data automatically once a service UUID is added.
+  NimBLEDevice::startAdvertising();
 
   Serial.println("BLE advertising started as '" DEVICE_NAME "'");
 }
