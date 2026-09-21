@@ -71,9 +71,8 @@
 #define HISTORY_CAPACITY 10
 
 // ---------- Timing ----------
-const unsigned long PUMP_SAFETY_MAX_MS    = 20000;   // hard cap for moisture-feedback mode, no matter what
-const unsigned long PUMP_PULSE_MS         = 1500;    // moisture mode: burst length between checks
-const unsigned long PUMP_SETTLE_MS        = 800;     // moisture mode: pause after a burst so the reading reflects reality
+const unsigned long PUMP_PULSE_MS         = 1500;    // burst length between checks, both pump modes
+const unsigned long PUMP_SETTLE_MS        = 800;     // pause after a burst so the reading reflects reality
 
 // ---------- Defaults ----------
 // Auto-watering fires only when ALL THREE are true: temp in [MIN,MAX], humidity
@@ -600,11 +599,11 @@ void startWatering(bool manual) {
   pumpRequestStop = false;
   pumpStartMillis = now;
   pumpPhaseStartMillis = now;
-  // "duration" mode runs up to the configured length; "moisture" mode runs up
-  // to the hard safety cap instead, since its whole point is to keep going
-  // until the target is reached (or the cap saves it from a bad sensor/empty
-  // reservoir).
-  pumpMaxRunMs = (pumpMode == "moisture") ? PUMP_SAFETY_MAX_MS : pumpDurationMs;
+  // Same user-configured run length caps both modes now — "moisture" mode
+  // just adds an earlier stop (soilWetTarget, checked in updatePump()) on
+  // top of it, instead of ignoring pumpDurationMs and always running to a
+  // fixed internal cap regardless of what's configured.
+  pumpMaxRunMs = pumpDurationMs;
   pumpRelayOn = true;
   pumpOn = true;
   digitalWrite(RELAY_PIN, HIGH); // adjust to LOW if your relay is active-low
@@ -632,10 +631,10 @@ void stopWatering() {
 // Advances the pump's on/off pulsing by one step. Pulses (rather than one
 // continuous run) so soil readings between bursts reflect water that's
 // actually reached the sensor. Whatever the mode, soilMaxPercent is a
-// universal cutoff: watering always stops immediately once soil is at/above
-// it, even if there's time (or moisture-target headroom) left. Called every
-// loop() iteration so an emergency stop or a sensor publish can happen
-// mid-watering instead of waiting up to ~20s for one blocking call to finish.
+// universal cutoff: watering always stops once soil is at/above it, even if
+// there's time (or moisture-target headroom) left. Called every loop()
+// iteration so an emergency stop or a sensor publish can happen mid-watering
+// instead of waiting for one blocking call to finish.
 void updatePump() {
   if (!pumpActive) return;
 
@@ -661,14 +660,20 @@ void updatePump() {
     digitalWrite(RELAY_PIN, LOW);
     pumpRelayOn = false;
     pumpPhaseStartMillis = now;
+    // Soil is checked at the end of the settle phase below, not here — right
+    // at the instant the relay switches off is exactly when its coil/motor
+    // can put a noise spike on a soil sensor sharing the same supply, which
+    // was previously read immediately and could misread as "soil is wet"
+    // and stop the pump after a single ~1.5s pulse.
+  } else {
+    unsigned long settle = (PUMP_SETTLE_MS < remaining) ? PUMP_SETTLE_MS : remaining;
+    if (phaseElapsed < settle) return;
 
     int soil = readMoisturePercent();
     if (soil >= soilMaxPercent || (pumpMode == "moisture" && soil >= soilWetTarget)) {
       stopWatering();
+      return;
     }
-  } else {
-    unsigned long settle = (PUMP_SETTLE_MS < remaining) ? PUMP_SETTLE_MS : remaining;
-    if (phaseElapsed < settle) return;
 
     digitalWrite(RELAY_PIN, HIGH);
     pumpRelayOn = true;

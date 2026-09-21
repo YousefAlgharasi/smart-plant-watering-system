@@ -385,7 +385,7 @@
         <div id="pump-target-field" class="hidden">
           <label class="field-label" for="soil-wet-target">Target moisture (%)</label>
           <input type="number" id="soil-wet-target" step="1" min="0" max="100" value="65" />
-          <p class="hint-small">Always stops after ~20s regardless, even if this target is never reached.</p>
+          <p class="hint-small">Also stops after the Run time above elapses, even if this target is never reached.</p>
         </div>
 
         <label class="field-label" for="soil-max-percent">Emergency cutoff — always stop at (%)</label>
@@ -1261,7 +1261,8 @@
 
   function updatePumpModeFields() {
     var moisture = el.pumpModeSelect.value === 'moisture';
-    el.pumpDurationField.classList.toggle('hidden', moisture);
+    // Run time is the actual cap in both modes now, so it's never hidden —
+    // "moisture" mode just adds the target-moisture field as an earlier stop.
     el.pumpTargetField.classList.toggle('hidden', !moisture);
   }
 
